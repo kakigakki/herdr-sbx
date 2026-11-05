@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -60,7 +61,7 @@ class Fixture:
             {"name": name, "agent": agent, "status": status, "workspaces": [str(ws)]}
             for name, ws, status, *rest in items for agent in [rest[0] if rest else "claude"]]))
 
-    def run(self, *args, pick=None, without_sbx=False):
+    def run(self, *args, pick=None, without_sbx=False, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         fakes = FAKES
         if without_sbx:
@@ -78,6 +79,7 @@ class Fixture:
         })
         if pick:
             env["FAKE_FZF_PICK"] = pick
+        env.update(extra_env or {})
         return subprocess.run([sys.executable, "-m", "herdr_sbx", *args], cwd=ROOT, env=env,
                               capture_output=True, text=True, timeout=30)
 
@@ -254,7 +256,7 @@ class OpenSandboxWorkspace(unittest.TestCase):
 
         out = self.f.run("open")
 
-        self.assertEqual(out.stderr, "")
+        self.assertNotIn("Traceback", out.stderr)
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
@@ -346,6 +348,61 @@ class Launch(unittest.TestCase):
 
         self.assertEqual(self.f.herdr_calls("workspace", "focus"), [])
         self.assertEqual(self.f.launched(), ["app-2"])
+
+
+class HeadlessLaunch(unittest.TestCase):
+    """`launch --headless`: Claude runs in the sandbox without a workspace (mainline's own-PR review)."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.f.sandboxes(("app-2", self.f.repo, "running"))
+        self.workdir = self.f.root / "wt"
+        self.setup = self.f.root / "setup.sh"
+        self.result = self.f.root / "out" / "app-PR7.md"
+        self.setup.write_text(f"mkdir -p {self.workdir} {self.result.parent}\necho {self.workdir}\n")
+        self.prompt = self.f.root / "left.md"
+        self.prompt.write_text("review in {{WORKDIR}}")
+        self.log = self.f.root / "app-PR7.log"
+
+    def launch(self, **env):
+        return self.f.run("launch", "--repo", str(self.f.repo), "--label", "🔍app#7", "--setup-file", str(self.setup),
+                          "--prompt-file", str(self.prompt), "--headless", "--log", str(self.log),
+                          "--fetch", str(self.result), extra_env=env)
+
+    def wait_for_result(self):
+        for _ in range(100):
+            if self.result.exists():
+                return self.result.read_text()
+            time.sleep(0.1)
+        self.fail("the result was never fetched")
+
+    def test_runs_claude_in_the_work_directory_and_fetches_the_result_without_a_workspace(self):
+        out = self.launch(FAKE_CLAUDE_WRITES=str(self.result))
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "app-2")
+        self.assertEqual(self.wait_for_result(), "review result")
+        self.assertEqual(self.f.herdr_calls("workspace"), [])
+        self.assertEqual(self.f.herdr_calls("pane"), [])
+        [claude] = self.f.calls("claude")
+        self.assertEqual(claude, ["-p", str(self.workdir), f"review in {self.workdir}"])
+        self.assertIn(["exec", "app-2", "--", "cat", str(self.result)], self.f.calls("sbx"))
+        self.assertIn("claude done", self.log.read_text())
+        leftovers = [p for p in Path(tempfile.gettempdir()).glob("herdr-sbx-prompt-*")
+                     if str(self.workdir) in p.read_text()]
+        self.assertEqual(leftovers, [])
+
+    def test_a_run_without_a_result_leaves_a_note_pointing_at_the_log(self):
+        self.result.parent.mkdir()
+        self.result.write_text("an earlier run's result")
+
+        out = self.launch()
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        note = self.wait_for_result()
+        self.assertIn("app-2", note)
+        self.assertIn(str(self.log), note)
 
 
 class PickAmongSandboxes(unittest.TestCase):

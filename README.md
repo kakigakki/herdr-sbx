@@ -17,6 +17,32 @@ Press the key in any pane of a repository:
    - None: a notification says so. **The plugin never creates sandboxes** (create them with `sbx` or your project's own script).
 3. The focused pane is split (to the right when it is wide, otherwise downward), and the new pane, named after the sandbox, runs `HERDR_AGENT=claude sbx run --name <sandbox>`.
 
+## Sandbox summary in the sidebar (optional)
+
+`python3 -m herdr_sbx report` puts a `$sbx` workspace token on the workspace whose checkout is the directory a sandbox was created from (the first workspace in `sbx ls`), listing all of that directory's sandboxes:
+
+```text
+relation-1● 2⡿1?1  relation-2○
+```
+
+`●` running / `○` stopped, then the number of interactive Claude sessions attached from the host (`sbx run --name …` processes), how many are working (`⡿`) and how many wait for you (`?`). States come from herdr for panes opened by this plugin. The VM is never looked into, so this does not keep sandboxes awake; `claude -p` running headless inside a VM is not counted.
+
+herdr plugins have no timer, so run `report` from your own periodic job (e.g. a launchd agent or cron every minute). Tokens expire after 5 minutes when the job stops.
+
+```sh
+cd /path/to/herdr-sbx && python3 -m herdr_sbx report
+```
+
+Show it in `~/.config/herdr/config.toml`, e.g. at the end of a spaces row, and on Claude's agent rows (the pane token `sbx` is set on panes this plugin opens):
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status", { token = "$sbx", fg = "#83a598" }]]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [["state_icon", "workspace", "tab", { token = "$sbx", fg = "#83a598" }], ["terminal_title_stripped"]]
+```
+
 ## Requirements
 
 - herdr 0.9.5 or later, `sbx`, `fzf`, `git`, `python3` (standard library only)

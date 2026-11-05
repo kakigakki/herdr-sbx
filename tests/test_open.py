@@ -25,6 +25,7 @@ class Fixture:
         self.sbx_state = self.root / "sbx.json"
         self.plugin_state = self.root / "state"
         self.plugin_state.mkdir()
+        self.ps = self.root / "ps.txt"
         self.repo = self.root / "app"
         self.repo.mkdir()
         git("init", "-q", "-b", "main", cwd=self.repo)
@@ -55,7 +56,7 @@ class Fixture:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         env.update({
             "PATH": f"{FAKES}:{env['PATH']}",
-            "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state),
+            "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state), "FAKE_PS": str(self.ps),
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
         })
@@ -89,6 +90,8 @@ class OpenSingleSandbox(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("pane", "split"), [[
             "pane", "split", "w1:p1", "--direction", "right", "--cwd", str(self.f.repo), "--focus"]])
         self.assertEqual(self.f.herdr_calls("pane", "rename"), [["pane", "rename", "w1:p9", "app-1"]])
+        self.assertEqual(self.f.herdr_calls("pane", "report-metadata"), [
+            ["pane", "report-metadata", "w1:p9", "--source", "herdr-sbx", "--token", "sbx=app-1"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [
             ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1"]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
@@ -232,6 +235,71 @@ class PickAmongSandboxes(unittest.TestCase):
         self.f.focused(self.f.repo, workspace="w2", label="app-alt", pane="w2:p1")
         self.f.run("open", pick="app-1")
         self.assertEqual(self.offered()[0], "app-3")
+
+
+class ReportToSpaces(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        other = self.f.root / "other"
+        self.f.sandboxes(("app-2", self.f.repo, "stopped"), ("app-1", self.f.repo, "running"),
+                         ("other-1", other, "running"))
+        self.f.ps.write_text("\n".join([
+            "/opt/homebrew/bin/sbx daemon start",
+            "sbx exec app-1 -- sleep infinity",
+            "sbx run --name app-1",
+            "sbx run --name app-1",
+            "sbx run --name=app-1",
+            "grep sbx run --name app-1",
+        ]))
+
+        def agent(pane, status, sbx=None, agent="claude"):
+            return {"pane_id": pane, "agent": agent, "agent_status": status, "tokens": {"sbx": sbx} if sbx else {}}
+        self.f.herdr({
+            "workspaces": [
+                {"workspace_id": "w1", "label": "app", "worktree": {"checkout_path": str(self.f.repo)}},
+                {"workspace_id": "w2", "label": "app-alt", "worktree": {"checkout_path": str(self.f.repo / "sub")}},
+                {"workspace_id": "w3", "label": "loose"},
+            ],
+            "panes": {"w3:p1": {"pane_id": "w3:p1", "workspace_id": "w3", "cwd": str(other)}},
+            "agents": [agent("w1:p2", "working", "app-1"), agent("w1:p3", "blocked", "app-1"),
+                       agent("w1:p4", "idle", "app-1"), agent("w1:p5", "working"),
+                       agent("w1:p6", "working", "app-1", agent="codex")],
+        })
+
+    def reported(self):
+        out = {}
+        for call in self.f.herdr_calls("workspace", "report-metadata"):
+            ws = call[2]
+            if "--token" in call:
+                out[ws] = call[call.index("--token") + 1]
+            elif "--clear-token" in call:
+                out[ws] = None
+        return out
+
+    def test_only_the_workspace_of_the_creation_directory_shows_its_sandboxes(self):
+        out = self.f.run("report")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.reported(), {
+            "w1": "sbx=app-1● 3⡿1?1  app-2○",
+            "w2": None,
+            "w3": None,
+        })
+
+    def test_tokens_expire_when_the_job_stops(self):
+        self.f.run("report")
+
+        for call in self.f.herdr_calls("workspace", "report-metadata"):
+            self.assertIn("--ttl-ms", call)
+
+    def test_failures_are_silent(self):
+        self.f.sbx_state.unlink()
+
+        out = self.f.run("report")
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(self.f.herdr_calls("notification"), [])
 
 
 if __name__ == "__main__":

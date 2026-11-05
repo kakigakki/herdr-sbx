@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 
 PLUGIN_ID = "herdr-sbx"
@@ -129,6 +130,8 @@ def open_pane(origin, root, name):
     split = herdr("pane", "split", origin, "--direction", split_direction(origin), "--cwd", root, "--focus")
     pane = split["pane"]["pane_id"]
     herdr("pane", "rename", pane, name, raw=True)
+    # The pane name can be overwritten (e.g. by auto-naming plugins); the token is what report reads.
+    herdr("pane", "report-metadata", pane, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
     wait_shell_ready(pane)
     herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}", raw=True)
 
@@ -244,10 +247,72 @@ def cmd_open():
     remember(label, name)
 
 
+def sessions_per_sandbox():
+    """Interactive Claude sessions attached from the host: `sbx run --name <name>` processes.
+    The VM is not looked into, so that this never keeps a sandbox awake."""
+    out = subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True)
+    counts = {}
+    for line in out.stdout.splitlines():
+        argv = line.split()
+        if len(argv) < 2 or os.path.basename(argv[0]) != "sbx" or argv[1] != "run":
+            continue
+        for i, a in enumerate(argv):
+            name = argv[i + 1] if a == "--name" and i + 1 < len(argv) else a.partition("--name=")[2]
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+                break
+    return counts
+
+
+def workspace_dir(ws):
+    # Only the workspace's own checkout: a pane's cwd would also match workspaces that merely
+    # have a pane open in that directory.
+    path = (ws.get("worktree") or {}).get("checkout_path")
+    return os.path.realpath(path) if path else None
+
+
+def summary(sandbox, sessions, statuses):
+    name = sandbox["name"]
+    text = name + ("●" if sandbox.get("status") == "running" else "○")
+    count = max(sessions.get(name, 0), len(statuses))
+    text += f" {count}" if count else ""
+    working, blocked = statuses.count("working"), statuses.count("blocked")
+    text += f"⡿{working}" if working else ""
+    text += f"?{blocked}" if blocked else ""
+    return text
+
+
+def cmd_report():
+    by_dir = {}
+    for s in sandboxes():
+        by_dir.setdefault(primary_workspace(s), []).append(s)
+    sessions = sessions_per_sandbox()
+    statuses = {}
+    for a in herdr("agent", "list")["agents"]:
+        name = (a.get("tokens") or {}).get("sbx")
+        if name and a.get("agent") == "claude":
+            statuses.setdefault(name, []).append(a.get("agent_status"))
+    for ws in herdr("workspace", "list")["workspaces"]:
+        found = sorted(by_dir.get(workspace_dir(ws), []), key=lambda s: s["name"])
+        text = "  ".join(summary(s, sessions, statuses.get(s["name"], [])) for s in found)
+        # Expires on its own when the periodic job that calls report stops.
+        args = ["workspace", "report-metadata", ws["workspace_id"], "--source", PLUGIN_ID, "--ttl-ms", "300000"]
+        args += ["--token", f"sbx={text}"] if text else ["--clear-token", "sbx"]
+        herdr(*args, raw=True)
+
+
 def main(argv):
+    if argv == ["report"]:
+        # Runs every minute from a periodic job: report failures to stderr, never as notifications.
+        try:
+            cmd_report()
+        except (Abort, KeyError, ValueError, TypeError, AttributeError) as e:
+            print(f"herdr-sbx report: {e}", file=sys.stderr)
+            return 1
+        return 0
     commands = {"open": cmd_open, "pick": cmd_pick}
     if len(argv) != 1 or argv[0] not in commands:
-        print(f"usage: python3 -m herdr_sbx {{{'|'.join(commands)}}}")
+        print(f"usage: python3 -m herdr_sbx {{{'|'.join([*commands, 'report'])}}}")
         return 2
     try:
         commands[argv[0]]()

@@ -19,10 +19,11 @@ Press the key in any pane of a repository:
 
 ## Sandbox summary in the sidebar (optional)
 
-`python3 -m herdr_sbx report` puts a `$sbx` workspace token on the workspace whose checkout is the directory a sandbox was created from (the first workspace in `sbx ls`), listing all of that directory's sandboxes:
+`python3 -m herdr_sbx report` puts workspace tokens `$sbx1` … `$sbx6` on the workspace whose checkout is the directory a sandbox was created from (the first workspace in `sbx ls`), one per sandbox of that directory (a 7th and later are folded into `+N more`):
 
 ```text
-relation-1● 2⡿1?1  relation-2○
+relation-1● 2⡿1?1
+relation-2○
 ```
 
 `●` running / `○` stopped, then the number of interactive Claude sessions attached from the host (`sbx run --name …` processes), how many are working (`⡿`) and how many wait for you (`?`). States come from herdr for panes opened by this plugin. The VM is never looked into, so this does not keep sandboxes awake; `claude -p` running headless inside a VM is not counted.
@@ -33,11 +34,15 @@ herdr plugins have no timer, so run `report` from your own periodic job (e.g. a 
 cd /path/to/herdr-sbx && python3 -m herdr_sbx report
 ```
 
-Show it in `~/.config/herdr/config.toml`, e.g. at the end of a spaces row, and on Claude's agent rows (the pane token `sbx` is set on panes this plugin opens):
+Show them in `~/.config/herdr/config.toml` as rows of their own (a row whose tokens are unset is not drawn, so other workspaces keep their height), and the sandbox name on Claude's agent rows (the pane token `sbx` is set on panes this plugin opens):
 
 ```toml
 [ui.sidebar.spaces]
-rows = [["state_icon", "workspace"], ["branch", "git_status", { token = "$sbx", fg = "#83a598" }]]
+rows = [
+  ["state_icon", "workspace"], ["branch", "git_status"],
+  [{ token = "$sbx1", fg = "#83a598" }], [{ token = "$sbx2", fg = "#83a598" }], [{ token = "$sbx3", fg = "#83a598" }],
+  [{ token = "$sbx4", fg = "#83a598" }], [{ token = "$sbx5", fg = "#83a598" }], [{ token = "$sbx6", fg = "#83a598" }],
+]
 
 [ui.sidebar.agents.rows_by_agent]
 claude = [["state_icon", "workspace", "tab", { token = "$sbx", fg = "#83a598" }], ["terminal_title_stripped"]]

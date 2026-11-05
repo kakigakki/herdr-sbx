@@ -14,6 +14,8 @@ import time
 PLUGIN_ID = "herdr-sbx"
 # sbx's own naming rule. The name is typed into a host shell, so anything else is refused.
 SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
+# One sidebar row per sandbox ($sbx1 … $sbx6): a row whose tokens are unset is not drawn.
+REPORT_ROWS = 6
 
 
 class Abort(Exception):
@@ -310,10 +312,14 @@ def cmd_report():
     for ws in herdr("workspace", "list")["workspaces"]:
         directory = workspace_dir(ws)
         found = sorted(by_dir.get(directory, []) if directory else [], key=lambda s: s["name"])
-        text = "  ".join(summary(s, sessions, statuses.get(s["name"], [])) for s in found)
+        lines = [summary(s, sessions, statuses.get(s["name"], [])) for s in found]
+        if len(lines) > REPORT_ROWS:
+            lines = lines[:REPORT_ROWS - 1] + [f"+{len(lines) - REPORT_ROWS + 1} more"]
         # Expires on its own when the periodic job that calls report stops.
         args = ["workspace", "report-metadata", ws["workspace_id"], "--source", PLUGIN_ID, "--ttl-ms", "300000"]
-        args += ["--token", f"sbx={text}"] if text else ["--clear-token", "sbx"]
+        for i in range(REPORT_ROWS):
+            key = f"sbx{i + 1}"
+            args += ["--token", f"{key}={lines[i]}"] if i < len(lines) else ["--clear-token", key]
         herdr(*args, raw=True)
 
 

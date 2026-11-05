@@ -271,13 +271,11 @@ class ReportToSpaces(unittest.TestCase):
         })
 
     def reported(self):
+        """workspace -> the values of $sbx1.. in order (cleared rows dropped)."""
         out = {}
         for call in self.f.herdr_calls("workspace", "report-metadata"):
-            ws = call[2]
-            if "--token" in call:
-                out[ws] = call[call.index("--token") + 1]
-            elif "--clear-token" in call:
-                out[ws] = None
+            out[call[2]] = [call[i + 1] for i, a in enumerate(call) if a == "--token"]
+            self.assertEqual(len(out[call[2]]) + call.count("--clear-token"), 6)
         return out
 
     def test_only_the_workspace_of_the_creation_directory_shows_its_sandboxes(self):
@@ -285,10 +283,17 @@ class ReportToSpaces(unittest.TestCase):
 
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.reported(), {
-            "w1": "sbx=app-1● 3⡿1?1  app-2○",
-            "w2": None,
-            "w3": None,
+            "w1": ["sbx1=app-1● 3⡿1?1", "sbx2=app-2○"],
+            "w2": [],
+            "w3": [],
         })
+
+    def test_more_sandboxes_than_rows_end_with_a_count(self):
+        self.f.sandboxes(*[(f"app-{i}", self.f.repo, "running") for i in range(1, 9)])
+
+        self.f.run("report")
+
+        self.assertEqual(self.reported()["w1"][-2:], ["sbx5=app-5●", "sbx6=+3 more"])
 
     def test_tokens_expire_when_the_job_stops(self):
         self.f.run("report")

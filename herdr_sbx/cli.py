@@ -8,6 +8,8 @@ import os
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
 import time
 
 PLUGIN_ID = "herdr-sbx"
@@ -19,6 +21,14 @@ TOKEN = "herdr_sbx"
 
 class Abort(Exception):
     """A reason shown to the user as a herdr notification."""
+
+
+class SbxMissing(Abort):
+    """sbx is not installed."""
+
+
+class NoSandbox(Exception):
+    """launch: the repository has no sandbox; the caller falls back to its host mode (exit 3)."""
 
 
 def herdr(*args, raw=False):
@@ -73,7 +83,7 @@ def sandboxes():
     try:
         out = subprocess.run(["sbx", "ls", "--json"], capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        raise Abort("sbx is not installed") from None
+        raise SbxMissing("sbx is not installed") from None
     except subprocess.TimeoutExpired:
         raise Abort("sbx ls did not respond") from None
     if out.returncode != 0:
@@ -127,32 +137,41 @@ def split_direction(origin):
         return "down"
 
 
-def sandbox_dir(name):
-    """The cwd of a sandbox's workspace. Named after the sandbox, so tools that name a workspace
-    after its working directory (e.g. auto-namer) also name it after the sandbox."""
-    path = os.path.join(state_dir(), "ws", name)
+def sandbox_dir(label):
+    """The cwd of a workspace this plugin makes. Named after the workspace's label, so tools that
+    name a workspace after its working directory (e.g. auto-namer) keep that label."""
+    path = os.path.join(state_dir(), "ws", label.replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     return path
 
 
-def start_claude(pane, name):
+def start_claude(pane, name, prompt_file=None):
     wait_shell_ready(pane)
-    # When Claude ends, close the pane; closing the last one removes the sandbox's workspace.
+    command = f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}"
+    if prompt_file:
+        # The prompt file is a temp file of launch: read it once and remove it.
+        quoted = shlex.quote(prompt_file)
+        command += f' -- "$(cat {quoted}; rm -f {quoted})"'
+    # When Claude ends, close the pane; closing the last one removes the workspace.
     # `&&`: when sbx fails (daemon down, sandbox removed) the pane stays so the error can be read.
-    command = f'HERDR_AGENT=claude sbx run --name {shlex.quote(name)} && herdr pane close "$HERDR_PANE_ID"'
-    herdr("pane", "run", pane, command, raw=True)
+    herdr("pane", "run", pane, command + ' && herdr pane close "$HERDR_PANE_ID"', raw=True)
 
 
-def open_workspace(name):
-    created = herdr("workspace", "create", "--cwd", sandbox_dir(name), "--label", name, "--focus")
+def create_workspace(label, name):
+    """A focused workspace for sandbox `name`; returns its root pane."""
+    created = herdr("workspace", "create", "--cwd", sandbox_dir(label), "--label", label, "--focus")
     workspace = created["workspace"]["workspace_id"]
-    # The token, not the label, identifies the sandbox's workspace: labels can be renamed.
+    # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
         herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"{TOKEN}={name}",
               raw=True)
     except Abort:
         pass  # still recognized by its cwd (sandbox_from_cwd)
-    start_claude(created["root_pane"]["pane_id"], name)
+    return created["root_pane"]["pane_id"]
+
+
+def open_workspace(name):
+    start_claude(create_workspace(name, name), name)
 
 
 def add_claude(origin, name):
@@ -292,7 +311,8 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
-    existing = next((w for w in workspaces if sandbox_of(w) == name), None)
+    # The sandbox's own workspace, not one `launch` made for a task in the same sandbox.
+    existing = next((w for w in workspaces if sandbox_of(w) == name and w.get("label") == name), None)
     if existing:
         herdr("workspace", "focus", existing["workspace_id"], raw=True)
     else:
@@ -300,13 +320,71 @@ def cmd_open():
     remember(label, name)
 
 
+def run_setup(name, setup_file):
+    """Run the setup script inside the sandbox; its last stdout line is the work directory."""
+    with open(setup_file) as f:
+        try:
+            out = subprocess.run(["sbx", "exec", "-i", name, "--", "bash", "-s"], stdin=f, capture_output=True,
+                                 text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise Abort(f"setup in {name} timed out") from None
+    if out.returncode != 0:
+        raise Abort(f"setup in {name} failed: {(out.stderr or out.stdout).strip()[-200:]}")
+    lines = out.stdout.strip().splitlines()
+    return lines[-1].strip() if lines else ""
+
+
+def cmd_launch(argv):
+    """Start Claude with given prompts in a sandbox of the repository, in a workspace of its own.
+    For scripts that used to start Claude on the host (PR review, watch, CI fix)."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="python3 -m herdr_sbx launch")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--label", required=True, help="the new workspace's label")
+    parser.add_argument("--setup-file", help="bash run in the sandbox first; its last stdout line "
+                                             "replaces {{WORKDIR}} in the prompts")
+    parser.add_argument("--prompt-file", action="append", required=True, help="one pane per file, left to right")
+    args = parser.parse_args(argv)
+    root = repo_root(args.repo)
+    try:
+        found = candidates(root) if root else []
+    except SbxMissing as e:
+        raise NoSandbox(str(e)) from None
+    if not found:
+        raise NoSandbox(f"no sandbox for {root or args.repo}")
+    # No picker: callers run without a terminal (e.g. Raycast).
+    name = min(found, key=lambda s: (s.get("status") != "running", s["name"]))["name"]
+    workdir = run_setup(name, args.setup_file) if args.setup_file else ""
+    prompts = []
+    for path in args.prompt_file:
+        with open(path) as f:
+            text = f.read().replace("{{WORKDIR}}", workdir)
+        fd, prompt = tempfile.mkstemp(prefix="herdr-sbx-prompt-", suffix=".md")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        prompts.append(prompt)
+    panes = [create_workspace(args.label, name)]
+    for _ in prompts[1:]:
+        panes.append(herdr("pane", "split", panes[0], "--direction", "right", "--ratio", "0.6",
+                           "--cwd", sandbox_dir(args.label), "--no-focus")["pane"]["pane_id"])
+    for pane, prompt in zip(panes, prompts):
+        start_claude(pane, name, prompt)
+    print(name)
+
+
 def main(argv):
-    commands = {"open": cmd_open, "pick": cmd_pick}
-    if len(argv) != 1 or argv[0] not in commands:
+    commands = {"open": cmd_open, "pick": cmd_pick, "launch": cmd_launch}
+    if not argv or argv[0] not in commands or (argv[0] != "launch" and len(argv) != 1):
         print(f"usage: python3 -m herdr_sbx {{{'|'.join(commands)}}}")
         return 2
     try:
-        commands[argv[0]]()
+        if argv[0] == "launch":
+            cmd_launch(argv[1:])
+        else:
+            commands[argv[0]]()
+    except NoSandbox as e:
+        print(e, file=sys.stderr)
+        return 3
     except Abort as e:
         notify(str(e))
         return 1

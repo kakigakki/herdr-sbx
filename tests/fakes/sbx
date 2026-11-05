@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Fake sbx: logs each call to $FAKE_LOG; `ls --json` prints $FAKE_SBX (a JSON file), or fails when absent."""
+"""Fake sbx: logs each call to $FAKE_LOG; `ls --json` prints $FAKE_SBX (a JSON file), or fails when absent;
+`exec -i` runs the stdin script locally."""
 import json
 import os
+import subprocess
 import sys
 
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(["sbx", *args]) + "\n")
 path = os.environ.get("FAKE_SBX", "")
+if args[:2] == ["exec", "-i"]:
+    # Run the setup script from stdin locally, standing in for the VM.
+    sys.exit(subprocess.run(["bash", "-s"], stdin=sys.stdin).returncode)
 if args[:2] == ["ls", "--json"] and os.path.exists(path):
     print(open(path).read())
     sys.exit(0)

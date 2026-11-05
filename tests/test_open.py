@@ -60,10 +60,18 @@ class Fixture:
             {"name": name, "agent": agent, "status": status, "workspaces": [str(ws)]}
             for name, ws, status, *rest in items for agent in [rest[0] if rest else "claude"]]))
 
-    def run(self, *args, pick=None):
+    def run(self, *args, pick=None, without_sbx=False):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
+        fakes = FAKES
+        if without_sbx:
+            fakes = self.root / "fakes-without-sbx"
+            fakes.mkdir(exist_ok=True)
+            for tool in ("herdr", "fzf"):
+                if not (fakes / tool).exists():
+                    (fakes / tool).symlink_to(FAKES / tool)
         env.update({
-            "PATH": f"{FAKES}:{env['PATH']}",
+            # Without sbx, PATH must not reach a real sbx either.
+            "PATH": f"{fakes}:/usr/bin:/bin" if without_sbx else f"{fakes}:{env['PATH']}",
             "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state),
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
@@ -259,6 +267,85 @@ class OpenSandboxWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
+
+class Launch(unittest.TestCase):
+    """`launch`: what the review / watch / fix-ci scripts call to start Claude in a sandbox."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.f.sandboxes(("app-1", self.f.repo, "stopped"), ("app-2", self.f.repo, "running"))
+        self.setup = self.f.root / "setup.sh"
+        self.setup.write_text("echo fetching >&2\necho noise\necho /vm/review-worktrees/app-pr-7\n")
+        self.left = self.f.root / "left.md"
+        self.left.write_text("review in {{WORKDIR}}")
+        self.right = self.f.root / "right.md"
+        self.right.write_text("explain {{WORKDIR}}")
+
+    def launch(self, *extra):
+        return self.f.run("launch", "--repo", str(self.f.repo), "--label", "🔍app#7", *extra)
+
+    def prompt_of(self, call):
+        """The prompt file a `pane run` passes to Claude, read back."""
+        path = call[3].split('"$(cat ')[1].split(";")[0]
+        return Path(path.strip("'")).read_text()
+
+    def test_starts_one_claude_per_prompt_in_a_labelled_workspace_of_the_running_sandbox(self):
+        out = self.launch("--setup-file", str(self.setup), "--prompt-file", str(self.left),
+                          "--prompt-file", str(self.right))
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "app-2")
+        ws_dir = self.f.plugin_state / "ws" / "🔍app#7"
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [
+            ["workspace", "create", "--cwd", str(ws_dir), "--label", "🔍app#7", "--focus"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-2"]])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [[
+            "pane", "split", "w9:p1", "--direction", "right", "--ratio", "0.6", "--cwd", str(ws_dir), "--no-focus"]])
+        runs = self.f.herdr_calls("pane", "run")
+        self.assertEqual([c[2] for c in runs], ["w9:p1", "w9:p2"])
+        self.assertTrue(all(c[3].startswith("HERDR_AGENT=claude sbx run --name app-2 -- ") for c in runs))
+        self.assertEqual([self.prompt_of(c) for c in runs],
+                         ["review in /vm/review-worktrees/app-pr-7", "explain /vm/review-worktrees/app-pr-7"])
+        self.assertEqual(self.f.calls("sbx")[-1][:5], ["exec", "-i", "app-2", "--", "bash"])
+
+    def test_without_a_sandbox_it_exits_3_for_the_caller_to_fall_back(self):
+        self.f.sandboxes(("other-1", self.f.root / "other", "running"))
+
+        out = self.launch("--prompt-file", str(self.left))
+
+        self.assertEqual(out.returncode, 3)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(self.f.herdr_calls("notification"), [])
+
+    def test_without_sbx_installed_it_also_exits_3(self):
+        out = self.f.run("launch", "--repo", str(self.f.repo), "--label", "x", "--prompt-file", str(self.left),
+                         without_sbx=True)
+
+        self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertEqual(self.f.herdr_calls("notification"), [])
+
+    def test_a_failing_setup_notifies_and_opens_nothing(self):
+        self.setup.write_text("echo cannot fetch >&2\nexit 4\n")
+
+        out = self.launch("--setup-file", str(self.setup), "--prompt-file", str(self.left))
+
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        [note] = self.f.herdr_calls("notification", "show")
+        self.assertIn("cannot fetch", " ".join(note))
+
+    def test_the_open_key_does_not_jump_to_a_launched_workspace(self):
+        self.f.workspaces.append({"workspace_id": "w6", "label": "🔍app#7", "tokens": {"herdr_sbx": "app-2"}})
+        self.f.focused(self.f.repo)
+        self.f.sandboxes(("app-2", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [])
+        self.assertEqual(self.f.launched(), ["app-2"])
 
 
 class PickAmongSandboxes(unittest.TestCase):

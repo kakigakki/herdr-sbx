@@ -21,6 +21,20 @@ When Claude exits normally, its pane closes (if `sbx run` fails, the pane stays 
 
 The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label.
 
+## Starting Claude with a prompt from scripts (`launch`)
+
+Scripts that used to start Claude on the host (a PR review, a watcher, a CI fix) can start it in a sandbox instead:
+
+```sh
+python3 -m herdr_sbx launch --repo <dir> --label "🔍app#7" \
+  [--setup-file setup.sh] --prompt-file left.md [--prompt-file right.md]
+```
+
+- Picks the repository's Claude sandbox without asking (running first, then by name).
+- Runs `setup.sh` inside the sandbox first (`sbx exec`, e.g. to check out a PR into a worktree in the VM); its last line of output replaces `{{WORKDIR}}` in the prompt files.
+- Opens a workspace with that label and one Claude per prompt file (`sbx run --name <sandbox> -- "<prompt>"`), the second one split to the right.
+- Exits with **3** when the repository has no sandbox, so the caller can fall back to running Claude another way. Other failures are shown as notifications.
+
 ## Requirements
 
 - herdr 0.9.5 or later, `sbx`, `fzf`, `git`, `python3` (standard library only)

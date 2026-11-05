@@ -1,5 +1,62 @@
 # herdr-sbx
 
-A [herdr](https://herdr.dev) plugin that opens Claude Code inside a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) for the current workspace, with herdr agent detection working.
+A [herdr](https://herdr.dev) plugin that opens Claude Code inside the [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) of the current workspace's repository, in a herdr workspace of its own, with herdr's agent detection working.
 
-Work in progress.
+## Why
+
+herdr recognizes an agent by the foreground process of a pane. When Claude Code runs inside an `sbx` microVM, that process is `sbx`, so the pane shows no agent and no idle / working / done / blocked state. herdr's documented fix is to set `HERDR_AGENT=claude` on the host-side wrapper command ([docs](https://herdr.dev/tui/docs/agents/#vms-and-sandbox-wrappers), [herdr#2181](https://github.com/herdrdev/herdr/issues/2181)). This plugin does that for you and finds the right sandbox.
+
+## What it does
+
+Each sandbox gets a herdr workspace of its own, named after the sandbox, so the Spaces sidebar lists the sandboxes in use and herdr's own agent states show how many Claude sessions each has and which are working or waiting for you.
+
+Press the key:
+
+- **In a repository's workspace**: the repository root is taken from the focused pane's working directory (a linked git worktree resolves to its main checkout), and Claude sandboxes whose first workspace in `sbx ls` is that root are the candidates.
+  - One: it is used. Several: an fzf picker opens, running ones first, and the one you picked last time in this workspace first of all. None: a notification says so. **The plugin never creates sandboxes** (create them with `sbx` or your project's own script).
+  - If the sandbox already has its workspace, herdr switches to it. Otherwise the workspace is created and Claude starts in it with `HERDR_AGENT=claude sbx run --name <sandbox>`.
+- **In a sandbox's workspace**: the focused pane is split (to the right when wide, otherwise downward) and one more Claude starts in the same sandbox.
+
+When Claude exits normally, its pane closes (if `sbx run` fails, the pane stays so you can read the error); when the last one closes, the workspace goes away. The sandbox itself keeps running.
+
+The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label.
+
+## Requirements
+
+- herdr 0.9.5 or later, `sbx`, `fzf`, `git`, `python3` (standard library only)
+- macOS or Linux
+
+## Install
+
+```sh
+herdr plugin install kakigakki/herdr-sbx
+```
+
+Bind a key in `~/.config/herdr/config.toml` (`prefix+s` is herdr's settings key by default):
+
+```toml
+[[keys.command]]
+key = "prefix+shift+s"
+type = "plugin_action"
+command = "herdr-sbx.open"
+description = "open Claude in this repo's sandbox"
+```
+
+## Limitations
+
+- State comes from reading the screen, so Claude's subagents inside the VM do not get their own rows.
+- Only sandboxes with an open workspace appear in the sidebar; use the picker or `sbx ls` for the others.
+- herdr's Claude integration hook cannot reach the host's herdr socket from inside the VM, so herdr does not learn the session id (no session resume through herdr). Do not mount `herdr.sock` into the sandbox: it has no caller authorization, and an agent with it can drive every pane on the host.
+
+## Development
+
+```sh
+herdr plugin link "$PWD"
+python3 -m unittest discover -s tests
+```
+
+Tests run the entry points as subprocesses with fake `herdr`, `sbx` and `fzf` first on `PATH`.
+
+## License
+
+MIT

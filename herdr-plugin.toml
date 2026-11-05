@@ -1,0 +1,26 @@
+# herdr plugin manifest.
+# Install: herdr plugin install kakigakki/herdr-sbx
+# Bind a key in ~/.config/herdr/config.toml:
+#   [[keys.command]]
+#   key = "prefix+shift+s"
+#   type = "plugin_action"
+#   command = "herdr-sbx.open"
+
+id = "herdr-sbx"
+name = "herdr-sbx"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Open Claude Code in the Docker Sandbox (sbx) of the current workspace, detected as a herdr agent."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "herdr-sbx: open Claude in this repository's sandbox"
+command = ["sh", "scripts/open.sh"]
+
+# The sandbox picker, opened by the action when several sandboxes match.
+[[panes]]
+id = "picker"
+title = "herdr-sbx"
+placement = "overlay"
+command = ["sh", "scripts/picker.sh"]

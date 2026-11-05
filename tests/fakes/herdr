@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Fake herdr: logs each call as a JSON line to $FAKE_LOG and answers from $FAKE_HERDR (JSON)."""
+import json
+import os
+import subprocess
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["herdr", *args]) + "\n")
+state = json.load(open(os.environ["FAKE_HERDR"]))
+
+
+def ok(result):
+    print(json.dumps({"id": "fake", "result": result}))
+
+
+if args[:2] == ["pane", "get"]:
+    pane = state.get("panes", {}).get(args[2])
+    if pane is None:
+        print(json.dumps({"error": {"code": "pane_not_found"}}))
+        sys.exit(1)
+    ok({"type": "pane_info", "pane": pane})
+elif args[:3] == ["plugin", "pane", "open"]:
+    # Run the overlay's command to completion, like a user picking and closing it.
+    env = dict(os.environ)
+    for i, a in enumerate(args):
+        if a == "--env":
+            key, _, value = args[i + 1].partition("=")
+            env[key] = value
+    subprocess.run(["sh", "scripts/picker.sh"], env=env, stdout=subprocess.DEVNULL)
+    ok({"type": "plugin_pane_opened", "plugin_pane": {"plugin_id": "herdr-sbx", "entrypoint": "picker",
+                                                      "pane": {"pane_id": "w1:p8"}}})
+elif args[:2] == ["pane", "layout"]:
+    pane = args[args.index("--pane") + 1]
+    ok({"type": "pane_layout", "layout": {"panes": [{"pane_id": pane, "rect": state["rects"][pane]}]}})
+elif args[:2] == ["pane", "split"]:
+    ok({"type": "pane_split", "pane": {"pane_id": "w9:p2"}})
+elif args[:2] == ["workspace", "create"]:
+    ok({"type": "workspace_created", "workspace": {"workspace_id": "w9"}, "root_pane": {"pane_id": "w9:p1"}})
+elif args[:2] == ["pane", "read"]:
+    print("$ ")
+elif args[:2] == ["workspace", "list"]:
+    ok({"type": "workspace_list", "workspaces": state.get("workspaces", [])})
+elif args[:2] in (["pane", "run"], ["workspace", "report-metadata"], ["workspace", "focus"],
+                  ["notification", "show"]):
+    pass  # the real herdr prints nothing on success
+else:
+    print(json.dumps({"error": {"code": "unknown_command", "args": args}}))
+    sys.exit(1)

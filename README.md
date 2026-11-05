@@ -1,6 +1,6 @@
 # herdr-sbx
 
-A [herdr](https://herdr.dev) plugin that opens Claude Code inside the [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) of the current workspace's repository, in a split pane, with herdr's agent detection working.
+A [herdr](https://herdr.dev) plugin that opens Claude Code inside the [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) of the current workspace's repository, in a herdr workspace of its own, with herdr's agent detection working.
 
 ## Why
 
@@ -8,45 +8,18 @@ herdr recognizes an agent by the foreground process of a pane. When Claude Code 
 
 ## What it does
 
-Press the key in any pane of a repository:
+Each sandbox gets a herdr workspace of its own, named after the sandbox, so the Spaces sidebar lists the sandboxes in use and herdr's own agent states show how many Claude sessions each has and which are working or waiting for you.
 
-1. The repository root is taken from the focused pane's working directory (a linked git worktree resolves to its main checkout).
-2. Sandboxes whose first workspace in `sbx ls` is that root are the candidates.
-   - One: it opens right away.
-   - Several: an fzf picker opens. Running ones come first, and the one you picked last time in this workspace (by label) comes first of all.
-   - None: a notification says so. **The plugin never creates sandboxes** (create them with `sbx` or your project's own script).
-3. The focused pane is split (to the right when it is wide, otherwise downward), and the new pane, named after the sandbox, runs `HERDR_AGENT=claude sbx run --name <sandbox>`.
+Press the key:
 
-## Sandbox summary in the sidebar (optional)
+- **In a repository's workspace**: the repository root is taken from the focused pane's working directory (a linked git worktree resolves to its main checkout), and Claude sandboxes whose first workspace in `sbx ls` is that root are the candidates.
+  - One: it is used. Several: an fzf picker opens, running ones first, and the one you picked last time in this workspace first of all. None: a notification says so. **The plugin never creates sandboxes** (create them with `sbx` or your project's own script).
+  - If the sandbox already has its workspace, herdr switches to it. Otherwise the workspace is created and Claude starts in it with `HERDR_AGENT=claude sbx run --name <sandbox>`.
+- **In a sandbox's workspace**: the focused pane is split (to the right when wide, otherwise downward) and one more Claude starts in the same sandbox.
 
-`python3 -m herdr_sbx report` puts workspace tokens `$sbx1` … `$sbx6` on the workspace whose checkout is the directory a sandbox was created from (the first workspace in `sbx ls`), one per sandbox of that directory (a 7th and later are folded into `+N more`):
+When Claude exits, its pane closes; when the last one closes, the workspace goes away. The sandbox itself keeps running.
 
-```text
-relation-1● 2⡿1?1
-relation-2○
-```
-
-`●` running / `○` stopped, then the number of interactive Claude sessions attached from the host (`sbx run --name …` processes), how many are working (`⡿`) and how many wait for you (`?`). States come from herdr for panes opened by this plugin. The VM is never looked into, so this does not keep sandboxes awake; `claude -p` running headless inside a VM is not counted.
-
-herdr plugins have no timer, so run `report` from your own periodic job (e.g. a launchd agent or cron every minute). Tokens expire after 5 minutes when the job stops.
-
-```sh
-cd /path/to/herdr-sbx && python3 -m herdr_sbx report
-```
-
-Show them in `~/.config/herdr/config.toml` as rows of their own (a row whose tokens are unset is not drawn, so other workspaces keep their height), and the sandbox name on Claude's agent rows (the pane token `sbx` is set on panes this plugin opens):
-
-```toml
-[ui.sidebar.spaces]
-rows = [
-  ["state_icon", "workspace"], ["branch", "git_status"],
-  [{ token = "$sbx1", fg = "#83a598" }], [{ token = "$sbx2", fg = "#83a598" }], [{ token = "$sbx3", fg = "#83a598" }],
-  [{ token = "$sbx4", fg = "#83a598" }], [{ token = "$sbx5", fg = "#83a598" }], [{ token = "$sbx6", fg = "#83a598" }],
-]
-
-[ui.sidebar.agents.rows_by_agent]
-claude = [["state_icon", "workspace", "tab", { token = "$sbx", fg = "#83a598" }], ["terminal_title_stripped"]]
-```
+The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token, not by their label.
 
 ## Requirements
 
@@ -72,8 +45,8 @@ description = "open Claude in this repo's sandbox"
 ## Limitations
 
 - State comes from reading the screen, so Claude's subagents inside the VM do not get their own rows.
+- Only sandboxes with an open workspace appear in the sidebar; use the picker or `sbx ls` for the others.
 - herdr's Claude integration hook cannot reach the host's herdr socket from inside the VM, so herdr does not learn the session id (no session resume through herdr). Do not mount `herdr.sock` into the sandbox: it has no caller authorization, and an agent with it can drive every pane on the host.
-- Each run opens a new Claude session in the sandbox (`sbx run --name` behavior).
 
 ## Development
 

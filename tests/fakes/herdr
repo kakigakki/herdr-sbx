@@ -2,6 +2,7 @@
 """Fake herdr: logs each call as a JSON line to $FAKE_LOG and answers from $FAKE_HERDR (JSON)."""
 import json
 import os
+import subprocess
 import sys
 
 args = sys.argv[1:]
@@ -20,6 +21,16 @@ if args[:2] == ["pane", "get"]:
         print(json.dumps({"error": {"code": "pane_not_found"}}))
         sys.exit(1)
     ok({"type": "pane_info", "pane": pane})
+elif args[:3] == ["plugin", "pane", "open"]:
+    # Run the overlay's command to completion, like a user picking and closing it.
+    env = dict(os.environ)
+    for i, a in enumerate(args):
+        if a == "--env":
+            key, _, value = args[i + 1].partition("=")
+            env[key] = value
+    subprocess.run(["sh", "scripts/picker.sh"], env=env, stdout=subprocess.DEVNULL)
+    ok({"type": "plugin_pane_opened", "plugin_pane": {"plugin_id": "herdr-sbx", "entrypoint": "picker",
+                                                      "pane": {"pane_id": "w1:p8"}}})
 elif args[:2] == ["tab", "create"]:
     ok({"type": "tab_created", "tab": {"tab_id": "w1:t9"}, "root_pane": {"pane_id": "w1:p9"}})
 elif args[:2] == ["pane", "read"]:

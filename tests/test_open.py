@@ -49,7 +49,7 @@ class Fixture:
         self.sbx_state.write_text(json.dumps([
             {"name": name, "status": status, "workspaces": [str(ws)]} for name, ws, status in items]))
 
-    def run(self, *args):
+    def run(self, *args, pick=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         env.update({
             "PATH": f"{FAKES}:{env['PATH']}",
@@ -57,6 +57,8 @@ class Fixture:
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
         })
+        if pick:
+            env["FAKE_FZF_PICK"] = pick
         return subprocess.run([sys.executable, "-m", "herdr_sbx", *args], cwd=ROOT, env=env,
                               capture_output=True, text=True, timeout=30)
 
@@ -146,6 +148,48 @@ class OpenSingleSandbox(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("tab", "create"), [])
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn("sbx", " ".join(note))
+
+
+class PickAmongSandboxes(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.f.focused(self.f.repo)
+        self.f.sandboxes(("app-2", self.f.repo, "stopped"), ("app-3", self.f.repo, "running"),
+                         ("app-1", self.f.repo, "stopped"), ("other-1", self.f.root / "other", "running"))
+
+    def offered(self):
+        return [line.split()[0] for line in self.f.calls("fzf")[-1]]
+
+    def test_several_matches_open_the_picked_sandbox(self):
+        out = self.f.run("open", pick="app-2")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.f.herdr_calls("plugin", "pane", "open")), 1)
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [
+            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-2"]])
+
+    def test_the_picker_lists_running_first_then_by_name_with_status(self):
+        self.f.run("open", pick="app-1")
+
+        self.assertEqual(self.offered(), ["app-3", "app-1", "app-2"])
+        self.assertIn("running", self.f.calls("fzf")[-1][0])
+
+    def test_escape_opens_nothing(self):
+        out = self.f.run("open")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("notification"), [])
+
+    def test_the_last_choice_of_the_workspace_comes_first_next_time(self):
+        self.f.run("open", pick="app-2")
+        self.f.run("open", pick="app-2")
+        self.assertEqual(self.offered()[0], "app-2")
+
+        self.f.focused(self.f.repo, workspace="w2", label="app-alt", pane="w2:p1")
+        self.f.run("open", pick="app-1")
+        self.assertEqual(self.offered()[0], "app-3")
 
 
 if __name__ == "__main__":

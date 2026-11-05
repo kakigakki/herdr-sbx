@@ -17,3 +17,10 @@ platforms = ["linux", "macos"]
 id = "open"
 title = "herdr-sbx: open Claude in this repository's sandbox"
 command = ["sh", "scripts/open.sh"]
+
+# The sandbox picker, opened by the action when several sandboxes match.
+[[panes]]
+id = "picker"
+title = "herdr-sbx"
+placement = "overlay"
+command = ["sh", "scripts/picker.sh"]

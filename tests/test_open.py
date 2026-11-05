@@ -60,10 +60,18 @@ class Fixture:
             {"name": name, "agent": agent, "status": status, "workspaces": [str(ws)]}
             for name, ws, status, *rest in items for agent in [rest[0] if rest else "claude"]]))
 
-    def run(self, *args, pick=None):
+    def run(self, *args, pick=None, without_sbx=False):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
+        fakes = FAKES
+        if without_sbx:
+            fakes = self.root / "fakes-without-sbx"
+            fakes.mkdir(exist_ok=True)
+            for tool in ("herdr", "fzf"):
+                if not (fakes / tool).exists():
+                    (fakes / tool).symlink_to(FAKES / tool)
         env.update({
-            "PATH": f"{FAKES}:{env['PATH']}",
+            # Without sbx, PATH must not reach a real sbx either.
+            "PATH": f"{fakes}:/usr/bin:/bin" if without_sbx else f"{fakes}:{env['PATH']}",
             "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state),
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
@@ -280,7 +288,7 @@ class Launch(unittest.TestCase):
 
     def prompt_of(self, call):
         """The prompt file a `pane run` passes to Claude, read back."""
-        path = call[3].split('"$(cat ')[1].split(')"')[0]
+        path = call[3].split('"$(cat ')[1].split(";")[0]
         return Path(path.strip("'")).read_text()
 
     def test_starts_one_claude_per_prompt_in_a_labelled_workspace_of_the_running_sandbox(self):
@@ -310,6 +318,13 @@ class Launch(unittest.TestCase):
 
         self.assertEqual(out.returncode, 3)
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(self.f.herdr_calls("notification"), [])
+
+    def test_without_sbx_installed_it_also_exits_3(self):
+        out = self.f.run("launch", "--repo", str(self.f.repo), "--label", "x", "--prompt-file", str(self.left),
+                         without_sbx=True)
+
+        self.assertEqual(out.returncode, 3, out.stderr)
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
     def test_a_failing_setup_notifies_and_opens_nothing(self):

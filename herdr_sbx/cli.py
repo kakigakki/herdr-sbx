@@ -23,6 +23,10 @@ class Abort(Exception):
     """A reason shown to the user as a herdr notification."""
 
 
+class SbxMissing(Abort):
+    """sbx is not installed."""
+
+
 class NoSandbox(Exception):
     """launch: the repository has no sandbox; the caller falls back to its host mode (exit 3)."""
 
@@ -79,7 +83,7 @@ def sandboxes():
     try:
         out = subprocess.run(["sbx", "ls", "--json"], capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        raise Abort("sbx is not installed") from None
+        raise SbxMissing("sbx is not installed") from None
     except subprocess.TimeoutExpired:
         raise Abort("sbx ls did not respond") from None
     if out.returncode != 0:
@@ -145,7 +149,9 @@ def start_claude(pane, name, prompt_file=None):
     wait_shell_ready(pane)
     command = f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}"
     if prompt_file:
-        command += f' -- "$(cat {shlex.quote(prompt_file)})"'
+        # The prompt file is a temp file of launch: read it once and remove it.
+        quoted = shlex.quote(prompt_file)
+        command += f' -- "$(cat {quoted}; rm -f {quoted})"'
     # When Claude ends, close the pane; closing the last one removes the workspace.
     # `&&`: when sbx fails (daemon down, sandbox removed) the pane stays so the error can be read.
     herdr("pane", "run", pane, command + ' && herdr pane close "$HERDR_PANE_ID"', raw=True)
@@ -319,7 +325,7 @@ def run_setup(name, setup_file):
     with open(setup_file) as f:
         try:
             out = subprocess.run(["sbx", "exec", "-i", name, "--", "bash", "-s"], stdin=f, capture_output=True,
-                                 text=True, timeout=600)
+                                 text=True, timeout=180)
         except subprocess.TimeoutExpired:
             raise Abort(f"setup in {name} timed out") from None
     if out.returncode != 0:
@@ -340,7 +346,10 @@ def cmd_launch(argv):
     parser.add_argument("--prompt-file", action="append", required=True, help="one pane per file, left to right")
     args = parser.parse_args(argv)
     root = repo_root(args.repo)
-    found = candidates(root) if root else []
+    try:
+        found = candidates(root) if root else []
+    except SbxMissing as e:
+        raise NoSandbox(str(e)) from None
     if not found:
         raise NoSandbox(f"no sandbox for {root or args.repo}")
     # No picker: callers run without a terminal (e.g. Raycast).

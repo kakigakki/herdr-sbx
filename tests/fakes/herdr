@@ -35,14 +35,14 @@ elif args[:2] == ["pane", "layout"]:
     pane = args[args.index("--pane") + 1]
     ok({"type": "pane_layout", "layout": {"panes": [{"pane_id": pane, "rect": state["rects"][pane]}]}})
 elif args[:2] == ["pane", "split"]:
-    ok({"type": "pane_split", "pane": {"pane_id": "w1:p9"}})
+    ok({"type": "pane_split", "pane": {"pane_id": "w9:p2"}})
+elif args[:2] == ["workspace", "create"]:
+    ok({"type": "workspace_created", "workspace": {"workspace_id": "w9"}, "root_pane": {"pane_id": "w9:p1"}})
 elif args[:2] == ["pane", "read"]:
     print("$ ")
-elif args[:2] == ["agent", "list"]:
-    ok({"type": "agent_list", "agents": state.get("agents", [])})
 elif args[:2] == ["workspace", "list"]:
     ok({"type": "workspace_list", "workspaces": state.get("workspaces", [])})
-elif args[:2] in (["pane", "run"], ["pane", "rename"], ["pane", "report-metadata"], ["workspace", "report-metadata"],
+elif args[:2] in (["pane", "run"], ["workspace", "report-metadata"], ["workspace", "focus"],
                   ["notification", "show"]):
     pass  # the real herdr prints nothing on success
 else:

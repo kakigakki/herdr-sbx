@@ -1,3 +1,0 @@
-#!/bin/sh
-# Fake ps: prints $FAKE_PS (one command line per line), whatever the options.
-cat "$FAKE_PS" 2>/dev/null

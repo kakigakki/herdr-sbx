@@ -1,4 +1,4 @@
-"""Find the sbx sandbox of the focused pane's repository and open Claude in it in a split pane.
+"""Open Claude in the sbx sandbox of the focused pane's repository, one herdr workspace per sandbox.
 
 herdr recognizes an agent by the pane's foreground process, which is `sbx` here, so the
 command carries HERDR_AGENT=claude (https://herdr.dev/tui/docs/agents/#vms-and-sandbox-wrappers).
@@ -8,14 +8,11 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 
 PLUGIN_ID = "herdr-sbx"
 # sbx's own naming rule. The name is typed into a host shell, so anything else is refused.
 SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
-# One sidebar row per sandbox ($sbx1 … $sbx6): a row whose tokens are unset is not drawn.
-REPORT_ROWS = 6
 
 
 class Abort(Exception):
@@ -128,20 +125,33 @@ def split_direction(origin):
         return "down"
 
 
-def open_pane(origin, root, name):
-    split = herdr("pane", "split", origin, "--direction", split_direction(origin), "--cwd", root, "--focus")
-    pane = split["pane"]["pane_id"]
-    try:
-        herdr("pane", "rename", pane, name, raw=True)
-        # The pane name can be overwritten (e.g. by auto-naming plugins); the token is what report reads.
-        herdr("pane", "report-metadata", pane, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
-    except Abort:
-        pass  # cosmetic: the pane is already split, so still start Claude in it
+def sandbox_dir(name):
+    """The cwd of a sandbox's workspace. Named after the sandbox, so tools that name a workspace
+    after its working directory (e.g. auto-namer) also name it after the sandbox."""
+    path = os.path.join(state_dir(), "ws", name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def start_claude(pane, name):
     wait_shell_ready(pane)
-    # Clearing the token when sbx exits keeps a later host-side agent in this pane from being
-    # counted as the sandbox's.
-    herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}; "
-          f'herdr pane report-metadata "$HERDR_PANE_ID" --source {PLUGIN_ID} --clear-token sbx', raw=True)
+    # When Claude ends, close the pane; closing the last one removes the sandbox's workspace.
+    command = f'HERDR_AGENT=claude sbx run --name {shlex.quote(name)}; herdr pane close "$HERDR_PANE_ID"'
+    herdr("pane", "run", pane, command, raw=True)
+
+
+def open_workspace(name):
+    created = herdr("workspace", "create", "--cwd", sandbox_dir(name), "--label", name, "--focus")
+    workspace = created["workspace"]["workspace_id"]
+    # The token, not the label, identifies the sandbox's workspace: labels can be renamed.
+    herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
+    start_claude(created["root_pane"]["pane_id"], name)
+
+
+def add_claude(origin, name):
+    split = herdr("pane", "split", origin, "--direction", split_direction(origin), "--cwd", sandbox_dir(name),
+                  "--focus")
+    start_claude(split["pane"]["pane_id"], name)
 
 
 def state_dir():
@@ -229,12 +239,26 @@ def cmd_pick():
     write_atomic(result, out.stdout.split("\t")[0].strip() if out.returncode == 0 else "")
 
 
+def sandbox_of(workspace):
+    return (workspace.get("tokens") or {}).get("sbx")
+
+
 def cmd_open():
     ctx = context()
     workspace = ctx.get("workspace_id")
     origin = ctx.get("focused_pane_id")
+    if not workspace or not origin:
+        raise Abort("no focused pane")
+    workspaces = herdr("workspace", "list")["workspaces"]
+    here = sandbox_of(next((w for w in workspaces if w["workspace_id"] == workspace), {}))
+    if here:
+        # Inside a sandbox's workspace: one more Claude in the same sandbox.
+        if not SANDBOX_NAME.fullmatch(here):
+            raise Abort(f"unexpected sandbox name: {here!r}")
+        add_claude(origin, here)
+        return
     cwd = focused_cwd(ctx)
-    if not workspace or not origin or not cwd:
+    if not cwd:
         raise Abort("no focused pane")
     root = repo_root(cwd)
     if root is None:
@@ -251,90 +275,18 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
-    open_pane(origin, root, name)
+    existing = next((w for w in workspaces if sandbox_of(w) == name), None)
+    if existing:
+        herdr("workspace", "focus", existing["workspace_id"], raw=True)
+    else:
+        open_workspace(name)
     remember(label, name)
 
 
-def sessions_per_sandbox():
-    """Interactive Claude sessions attached from the host: `sbx run --name <name>` processes.
-    The VM is not looked into, so that this never keeps a sandbox awake."""
-    out = subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True)
-    counts = {}
-    for line in out.stdout.splitlines():
-        argv = line.split()
-        if not argv or os.path.basename(argv[0]) != "sbx":
-            continue
-        # Global flags may come before the subcommand (`sbx -D run …`).
-        if next((a for a in argv[1:] if not a.startswith("-")), None) != "run":
-            continue
-        name = None
-        for i, a in enumerate(argv):
-            if a == "--name" and i + 1 < len(argv):
-                name = argv[i + 1]
-            elif a.startswith("--name="):
-                name = a[len("--name="):]
-            if name:
-                counts[name] = counts.get(name, 0) + 1
-                break
-    return counts
-
-
-def workspace_dir(ws):
-    # Only the workspace's own checkout: a pane's cwd would also match workspaces that merely
-    # have a pane open in that directory.
-    path = (ws.get("worktree") or {}).get("checkout_path")
-    return os.path.realpath(path) if path else None
-
-
-def summary(sandbox, sessions, statuses):
-    name = sandbox["name"]
-    text = name + ("●" if sandbox.get("status") == "running" else "○")
-    count = max(sessions.get(name, 0), len(statuses))
-    text += f" {count}" if count else ""
-    working, blocked = statuses.count("working"), statuses.count("blocked")
-    text += f"⡿{working}" if working else ""
-    text += f"?{blocked}" if blocked else ""
-    return text
-
-
-def cmd_report():
-    by_dir = {}
-    for s in sandboxes():
-        directory = primary_workspace(s)
-        if directory and SANDBOX_NAME.fullmatch(str(s.get("name"))):
-            by_dir.setdefault(directory, []).append(s)
-    sessions = sessions_per_sandbox()
-    statuses = {}
-    for a in herdr("agent", "list")["agents"]:
-        name = (a.get("tokens") or {}).get("sbx")
-        if name and a.get("agent") == "claude":
-            statuses.setdefault(name, []).append(a.get("agent_status"))
-    for ws in herdr("workspace", "list")["workspaces"]:
-        directory = workspace_dir(ws)
-        found = sorted(by_dir.get(directory, []) if directory else [], key=lambda s: s["name"])
-        lines = [summary(s, sessions, statuses.get(s["name"], [])) for s in found]
-        if len(lines) > REPORT_ROWS:
-            lines = lines[:REPORT_ROWS - 1] + [f"+{len(lines) - REPORT_ROWS + 1} more"]
-        # Expires on its own when the periodic job that calls report stops.
-        args = ["workspace", "report-metadata", ws["workspace_id"], "--source", PLUGIN_ID, "--ttl-ms", "300000"]
-        for i in range(REPORT_ROWS):
-            key = f"sbx{i + 1}"
-            args += ["--token", f"{key}={lines[i]}"] if i < len(lines) else ["--clear-token", key]
-        herdr(*args, raw=True)
-
-
 def main(argv):
-    if argv == ["report"]:
-        # Runs every minute from a periodic job: report failures to stderr, never as notifications.
-        try:
-            cmd_report()
-        except (Abort, OSError, KeyError, ValueError, TypeError, AttributeError) as e:
-            print(f"herdr-sbx report: {e}", file=sys.stderr)
-            return 1
-        return 0
     commands = {"open": cmd_open, "pick": cmd_pick}
     if len(argv) != 1 or argv[0] not in commands:
-        print(f"usage: python3 -m herdr_sbx {{{'|'.join([*commands, 'report'])}}}")
+        print(f"usage: python3 -m herdr_sbx {{{'|'.join(commands)}}}")
         return 2
     try:
         commands[argv[0]]()

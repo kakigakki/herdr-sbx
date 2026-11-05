@@ -16,6 +16,10 @@ def git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+def launch(name):
+    return f'HERDR_AGENT=claude sbx run --name {name}; herdr pane close "$HERDR_PANE_ID"'
+
+
 class Fixture:
     def __init__(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -25,13 +29,13 @@ class Fixture:
         self.sbx_state = self.root / "sbx.json"
         self.plugin_state = self.root / "state"
         self.plugin_state.mkdir()
-        self.ps = self.root / "ps.txt"
         self.repo = self.root / "app"
         self.repo.mkdir()
         git("init", "-q", "-b", "main", cwd=self.repo)
         git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init",
             cwd=self.repo)
-        self.herdr({"panes": {}})
+        self.workspaces = [{"workspace_id": "w1", "label": "app"}]
+        self.herdr({})
 
     def worktree(self, name):
         path = self.root / name
@@ -39,7 +43,11 @@ class Fixture:
         return path
 
     def herdr(self, state):
-        self.herdr_state.write_text(json.dumps(state))
+        self.herdr_state.write_text(json.dumps({"workspaces": self.workspaces, **state}))
+
+    def sandbox_workspace(self, name, workspace_id="w5"):
+        """An existing workspace this plugin made for sandbox `name`."""
+        self.workspaces.append({"workspace_id": workspace_id, "label": name, "tokens": {"sbx": name}})
 
     def focused(self, cwd, *, workspace="w1", label="app", pane="w1:p1", size=(240, 60)):
         self.herdr({"panes": {pane: {"pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd)}},
@@ -56,7 +64,7 @@ class Fixture:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         env.update({
             "PATH": f"{FAKES}:{env['PATH']}",
-            "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state), "FAKE_PS": str(self.ps),
+            "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state),
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
         })
@@ -74,31 +82,60 @@ class Fixture:
     def herdr_calls(self, *prefix):
         return [c for c in self.calls("herdr") if c[:len(prefix)] == list(prefix)]
 
+    def launched(self):
+        """Sandbox names started with `pane run`, in order."""
+        return [c[3].split("--name ")[1].split(";")[0] for c in self.herdr_calls("pane", "run")]
 
-class OpenSingleSandbox(unittest.TestCase):
+
+class OpenSandboxWorkspace(unittest.TestCase):
     def setUp(self):
         self.f = Fixture()
         self.addCleanup(self.f.tmp.cleanup)
 
-    def test_opens_the_only_matching_sandbox_in_a_split_pane_with_the_agent_hint(self):
+    def test_a_new_workspace_named_after_the_sandbox_runs_claude_with_the_agent_hint(self):
         self.f.focused(self.f.repo)
         self.f.sandboxes(("app-1", self.f.repo, "running"), ("other-1", self.f.root / "other", "running"))
 
         out = self.f.run("open")
 
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [[
-            "pane", "split", "w1:p1", "--direction", "right", "--cwd", str(self.f.repo), "--focus"]])
-        self.assertEqual(self.f.herdr_calls("pane", "rename"), [["pane", "rename", "w1:p9", "app-1"]])
-        self.assertEqual(self.f.herdr_calls("pane", "report-metadata"), [
-            ["pane", "report-metadata", "w1:p9", "--source", "herdr-sbx", "--token", "sbx=app-1"]])
-        self.assertEqual(self.f.herdr_calls("pane", "run"), [
-            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1; herdr pane report-metadata \"$HERDR_PANE_ID\" --source herdr-sbx --clear-token sbx"]])
+        ws_dir = self.f.plugin_state / "ws" / "app-1"
+        self.assertTrue(ws_dir.is_dir())
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [
+            ["workspace", "create", "--cwd", str(ws_dir), "--label", "app-1", "--focus"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
-    def test_a_narrow_pane_is_split_downward(self):
-        self.f.focused(self.f.repo, size=(100, 60))
+    def test_an_existing_sandbox_workspace_is_only_focused(self):
+        self.f.sandbox_workspace("app-1")
+        self.f.focused(self.f.repo)
         self.f.sandboxes(("app-1", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+
+    def test_inside_a_sandbox_workspace_another_claude_joins_the_same_sandbox(self):
+        self.f.sandbox_workspace("app-2")
+        self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w5", label="app-2", pane="w5:p1")
+        self.f.sandboxes(("app-1", self.f.repo, "running"), ("app-2", self.f.repo, "running"))
+
+        out = self.f.run("open")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [[
+            "pane", "split", "w5:p1", "--direction", "right", "--cwd", str(self.f.plugin_state / "ws" / "app-2"),
+            "--focus"]])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p2", launch("app-2")]])
+
+    def test_a_narrow_pane_is_split_downward(self):
+        self.f.sandbox_workspace("app-1")
+        self.f.focused(self.f.repo, workspace="w5", pane="w5:p1", size=(100, 60))
 
         self.f.run("open")
 
@@ -112,8 +149,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("pane", "run"), [
-            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1; herdr pane report-metadata \"$HERDR_PANE_ID\" --source herdr-sbx --clear-token sbx"]])
+        self.assertEqual(self.f.launched(), ["app-1"])
 
     def test_a_subdirectory_resolves_to_the_repository_root(self):
         sub = self.f.repo / "src"
@@ -123,7 +159,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(len(self.f.herdr_calls("pane", "run")), 1)
+        self.assertEqual(self.f.launched(), ["app-1"])
 
     def test_read_only_suffix_on_the_workspace_is_ignored(self):
         self.f.focused(self.f.repo)
@@ -131,7 +167,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(len(self.f.herdr_calls("pane", "run")), 1)
+        self.assertEqual(self.f.launched(), ["app-1"])
 
     def test_sandboxes_of_other_agents_are_not_candidates(self):
         self.f.focused(self.f.repo)
@@ -140,8 +176,7 @@ class OpenSingleSandbox(unittest.TestCase):
         self.f.run("open")
 
         self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
-        self.assertEqual(self.f.herdr_calls("pane", "run"), [
-            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1; herdr pane report-metadata \"$HERDR_PANE_ID\" --source herdr-sbx --clear-token sbx"]])
+        self.assertEqual(self.f.launched(), ["app-1"])
 
     def test_no_matching_sandbox_only_notifies(self):
         self.f.focused(self.f.repo)
@@ -149,7 +184,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn(str(self.f.repo), " ".join(note))
         self.assertEqual([c for c in self.f.calls("sbx") if c[:1] != ["ls"]], [])
@@ -162,7 +197,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
     def test_sbx_failure_only_notifies(self):
@@ -170,7 +205,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn("sbx", " ".join(note))
 
@@ -181,7 +216,7 @@ class OpenSingleSandbox(unittest.TestCase):
         out = self.f.run("open")
 
         self.assertEqual(out.stderr, "")
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
     def test_a_sandbox_name_unsafe_for_the_shell_is_refused(self):
@@ -190,7 +225,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
@@ -211,8 +246,7 @@ class PickAmongSandboxes(unittest.TestCase):
 
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(len(self.f.herdr_calls("plugin", "pane", "open")), 1)
-        self.assertEqual(self.f.herdr_calls("pane", "run"), [
-            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-2; herdr pane report-metadata \"$HERDR_PANE_ID\" --source herdr-sbx --clear-token sbx"]])
+        self.assertEqual(self.f.launched(), ["app-2"])
 
     def test_the_picker_lists_running_first_then_by_name_with_status(self):
         self.f.run("open", pick="app-1")
@@ -224,7 +258,7 @@ class PickAmongSandboxes(unittest.TestCase):
         out = self.f.run("open")
 
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
     def test_the_last_choice_of_the_workspace_comes_first_next_time(self):
@@ -235,79 +269,6 @@ class PickAmongSandboxes(unittest.TestCase):
         self.f.focused(self.f.repo, workspace="w2", label="app-alt", pane="w2:p1")
         self.f.run("open", pick="app-1")
         self.assertEqual(self.offered()[0], "app-3")
-
-
-class ReportToSpaces(unittest.TestCase):
-    def setUp(self):
-        self.f = Fixture()
-        self.addCleanup(self.f.tmp.cleanup)
-        other = self.f.root / "other"
-        self.f.sandboxes(("app-2", self.f.repo, "stopped"), ("app-1", self.f.repo, "running"),
-                         ("other-1", other, "running"))
-        # A sandbox without workspaces must not show up on workspaces without a checkout.
-        sbx = json.loads(self.f.sbx_state.read_text()) + [{"name": "bare-1", "agent": "claude", "status": "running"}]
-        self.f.sbx_state.write_text(json.dumps(sbx))
-        self.f.ps.write_text("\n".join([
-            "/opt/homebrew/bin/sbx daemon start",
-            "sbx exec app-1 -- sleep infinity",
-            "sbx run --name app-1",
-            "sbx run --name app-1",
-            "/opt/homebrew/bin/sbx -D run claude --name=app-1",
-            "sbx run",
-            "grep sbx run --name app-1",
-        ]))
-
-        def agent(pane, status, sbx=None, agent="claude"):
-            return {"pane_id": pane, "agent": agent, "agent_status": status, "tokens": {"sbx": sbx} if sbx else {}}
-        self.f.herdr({
-            "workspaces": [
-                {"workspace_id": "w1", "label": "app", "worktree": {"checkout_path": str(self.f.repo)}},
-                {"workspace_id": "w2", "label": "app-alt", "worktree": {"checkout_path": str(self.f.repo / "sub")}},
-                {"workspace_id": "w3", "label": "loose"},
-            ],
-            "agents": [agent("w1:p2", "working", "app-1"), agent("w1:p3", "blocked", "app-1"),
-                       agent("w1:p4", "idle", "app-1"), agent("w1:p5", "working"),
-                       agent("w1:p6", "working", "app-1", agent="codex")],
-        })
-
-    def reported(self):
-        """workspace -> the values of $sbx1.. in order (cleared rows dropped)."""
-        out = {}
-        for call in self.f.herdr_calls("workspace", "report-metadata"):
-            out[call[2]] = [call[i + 1] for i, a in enumerate(call) if a == "--token"]
-            self.assertEqual(len(out[call[2]]) + call.count("--clear-token"), 6)
-        return out
-
-    def test_only_the_workspace_of_the_creation_directory_shows_its_sandboxes(self):
-        out = self.f.run("report")
-
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.reported(), {
-            "w1": ["sbx1=app-1● 3⡿1?1", "sbx2=app-2○"],
-            "w2": [],
-            "w3": [],
-        })
-
-    def test_more_sandboxes_than_rows_end_with_a_count(self):
-        self.f.sandboxes(*[(f"app-{i}", self.f.repo, "running") for i in range(1, 9)])
-
-        self.f.run("report")
-
-        self.assertEqual(self.reported()["w1"][-2:], ["sbx5=app-5●", "sbx6=+3 more"])
-
-    def test_tokens_expire_when_the_job_stops(self):
-        self.f.run("report")
-
-        for call in self.f.herdr_calls("workspace", "report-metadata"):
-            self.assertIn("--ttl-ms", call)
-
-    def test_failures_are_silent(self):
-        self.f.sbx_state.unlink()
-
-        out = self.f.run("report")
-
-        self.assertNotEqual(out.returncode, 0)
-        self.assertEqual(self.f.herdr_calls("notification"), [])
 
 
 if __name__ == "__main__":

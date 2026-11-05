@@ -120,20 +120,26 @@ def split_direction(origin):
     try:
         rect = next(p["rect"] for p in herdr("pane", "layout", "--pane", origin)["layout"]["panes"]
                     if p["pane_id"] == origin)
-    except (Abort, KeyError, StopIteration):
+        # Terminal cells are roughly twice as tall as wide.
+        return "right" if rect["width"] > rect["height"] * 2.2 else "down"
+    except (Abort, KeyError, TypeError, StopIteration):
         return "down"
-    # Terminal cells are roughly twice as tall as wide.
-    return "right" if rect["width"] > rect["height"] * 2.2 else "down"
 
 
 def open_pane(origin, root, name):
     split = herdr("pane", "split", origin, "--direction", split_direction(origin), "--cwd", root, "--focus")
     pane = split["pane"]["pane_id"]
-    herdr("pane", "rename", pane, name, raw=True)
-    # The pane name can be overwritten (e.g. by auto-naming plugins); the token is what report reads.
-    herdr("pane", "report-metadata", pane, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
+    try:
+        herdr("pane", "rename", pane, name, raw=True)
+        # The pane name can be overwritten (e.g. by auto-naming plugins); the token is what report reads.
+        herdr("pane", "report-metadata", pane, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
+    except Abort:
+        pass  # cosmetic: the pane is already split, so still start Claude in it
     wait_shell_ready(pane)
-    herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}", raw=True)
+    # Clearing the token when sbx exits keeps a later host-side agent in this pane from being
+    # counted as the sandbox's.
+    herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}; "
+          f'herdr pane report-metadata "$HERDR_PANE_ID" --source {PLUGIN_ID} --clear-token sbx', raw=True)
 
 
 def state_dir():
@@ -254,10 +260,17 @@ def sessions_per_sandbox():
     counts = {}
     for line in out.stdout.splitlines():
         argv = line.split()
-        if len(argv) < 2 or os.path.basename(argv[0]) != "sbx" or argv[1] != "run":
+        if not argv or os.path.basename(argv[0]) != "sbx":
             continue
+        # Global flags may come before the subcommand (`sbx -D run …`).
+        if next((a for a in argv[1:] if not a.startswith("-")), None) != "run":
+            continue
+        name = None
         for i, a in enumerate(argv):
-            name = argv[i + 1] if a == "--name" and i + 1 < len(argv) else a.partition("--name=")[2]
+            if a == "--name" and i + 1 < len(argv):
+                name = argv[i + 1]
+            elif a.startswith("--name="):
+                name = a[len("--name="):]
             if name:
                 counts[name] = counts.get(name, 0) + 1
                 break
@@ -285,7 +298,9 @@ def summary(sandbox, sessions, statuses):
 def cmd_report():
     by_dir = {}
     for s in sandboxes():
-        by_dir.setdefault(primary_workspace(s), []).append(s)
+        directory = primary_workspace(s)
+        if directory and SANDBOX_NAME.fullmatch(str(s.get("name"))):
+            by_dir.setdefault(directory, []).append(s)
     sessions = sessions_per_sandbox()
     statuses = {}
     for a in herdr("agent", "list")["agents"]:
@@ -293,7 +308,8 @@ def cmd_report():
         if name and a.get("agent") == "claude":
             statuses.setdefault(name, []).append(a.get("agent_status"))
     for ws in herdr("workspace", "list")["workspaces"]:
-        found = sorted(by_dir.get(workspace_dir(ws), []), key=lambda s: s["name"])
+        directory = workspace_dir(ws)
+        found = sorted(by_dir.get(directory, []) if directory else [], key=lambda s: s["name"])
         text = "  ".join(summary(s, sessions, statuses.get(s["name"], [])) for s in found)
         # Expires on its own when the periodic job that calls report stops.
         args = ["workspace", "report-metadata", ws["workspace_id"], "--source", PLUGIN_ID, "--ttl-ms", "300000"]
@@ -306,7 +322,7 @@ def main(argv):
         # Runs every minute from a periodic job: report failures to stderr, never as notifications.
         try:
             cmd_report()
-        except (Abort, KeyError, ValueError, TypeError, AttributeError) as e:
+        except (Abort, OSError, KeyError, ValueError, TypeError, AttributeError) as e:
             print(f"herdr-sbx report: {e}", file=sys.stderr)
             return 1
         return 0

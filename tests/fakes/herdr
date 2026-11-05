@@ -42,9 +42,6 @@ elif args[:2] == ["agent", "list"]:
     ok({"type": "agent_list", "agents": state.get("agents", [])})
 elif args[:2] == ["workspace", "list"]:
     ok({"type": "workspace_list", "workspaces": state.get("workspaces", [])})
-elif args[:2] == ["pane", "list"]:
-    ws = args[args.index("--workspace") + 1]
-    ok({"type": "pane_list", "panes": [p for p in state.get("panes", {}).values() if p.get("workspace_id") == ws]})
 elif args[:2] in (["pane", "run"], ["pane", "rename"], ["pane", "report-metadata"], ["workspace", "report-metadata"],
                   ["notification", "show"]):
     pass  # the real herdr prints nothing on success

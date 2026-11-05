@@ -5,11 +5,14 @@ command carries HERDR_AGENT=claude (https://herdr.dev/tui/docs/agents/#vms-and-s
 """
 import json
 import os
+import re
+import shlex
 import subprocess
 import time
 
 PLUGIN_ID = "herdr-sbx"
-TITLE = "herdr-sbx"
+# sbx's own naming rule. The name is typed into a host shell, so anything else is refused.
+SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
 
 
 class Abort(Exception):
@@ -29,7 +32,7 @@ def herdr(*args, raw=False):
 
 
 def notify(body):
-    subprocess.run(["herdr", "notification", "show", TITLE, "--body", body], capture_output=True)
+    subprocess.run(["herdr", "notification", "show", PLUGIN_ID, "--body", body], capture_output=True)
 
 
 def context():
@@ -43,7 +46,7 @@ def focused_cwd(ctx):
         try:
             pane = herdr("pane", "get", pane_id)["pane"]
             return pane.get("foreground_cwd") or pane.get("cwd")
-        except (Abort, KeyError, ValueError):
+        except (Abort, KeyError):
             pass
     return ctx.get("focused_pane_cwd")
 
@@ -66,12 +69,20 @@ def repo_root(cwd):
 
 def sandboxes():
     try:
-        out = subprocess.run(["sbx", "ls", "--json"], capture_output=True, text=True)
+        out = subprocess.run(["sbx", "ls", "--json"], capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
         raise Abort("sbx is not installed") from None
+    except subprocess.TimeoutExpired:
+        raise Abort("sbx ls did not respond") from None
     if out.returncode != 0:
         raise Abort(f"sbx ls failed: {out.stderr.strip()[:200]}")
-    return json.loads(out.stdout or "[]")
+    try:
+        found = json.loads(out.stdout or "[]")
+    except ValueError:
+        found = None
+    if not isinstance(found, list):
+        raise Abort("sbx ls --json: unexpected output")
+    return found
 
 
 def primary_workspace(sandbox):
@@ -86,7 +97,11 @@ def primary_workspace(sandbox):
 
 
 def candidates(root):
-    return [s for s in sandboxes() if primary_workspace(s) == root]
+    found = [s for s in sandboxes() if primary_workspace(s) == root]
+    for s in found:
+        if not SANDBOX_NAME.fullmatch(str(s.get("name"))):
+            raise Abort(f"unexpected sandbox name: {s.get('name')!r}")
+    return found
 
 
 def wait_shell_ready(pane, timeout=8.0):
@@ -104,11 +119,12 @@ def open_tab(workspace, root, name):
     created = herdr("tab", "create", "--workspace", workspace, "--cwd", root, "--label", name, "--focus")
     pane = created["root_pane"]["pane_id"]
     wait_shell_ready(pane)
-    herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {name}", raw=True)
+    herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}", raw=True)
 
 
 def state_dir():
-    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser("~/.local/state/herdr-sbx")
+    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), PLUGIN_ID)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -126,19 +142,32 @@ def remember(label, name):
     last = load_last()
     last[label] = name
     path = os.path.join(state_dir(), "last.json")
-    with open(path + ".tmp", "w") as f:
-        json.dump(last, f)
-    os.replace(path + ".tmp", path)
+    write_atomic(path, json.dumps(last))
 
 
-def wait_closed(pane, timeout=600.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def write_atomic(path, text):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def wait_for_pick(pane, result):
+    """Until the picker has written its result or its pane is gone. No timeout: the user
+    may leave the picker open as long as they like."""
+    while not os.path.exists(result):
         try:
             herdr("pane", "get", pane)
         except Abort:
             return
         time.sleep(0.2)
+    # The tab must open after the overlay is gone (see pick).
+    for _ in range(50):
+        try:
+            herdr("pane", "get", pane)
+        except Abort:
+            return
+        time.sleep(0.1)
 
 
 def pick(found, root):
@@ -149,7 +178,7 @@ def pick(found, root):
     opened = herdr("plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "picker",
                    "--placement", "overlay", "--focus", "--env", f"HERDR_SBX_CHOICES={choices}",
                    "--env", f"HERDR_SBX_ROOT={root}", "--env", f"HERDR_SBX_RESULT={result}")
-    wait_closed(opened["plugin_pane"]["pane"]["pane_id"])
+    wait_for_pick(opened["plugin_pane"]["pane"]["pane_id"], result)
     try:
         with open(result) as f:
             name = f.read().strip()
@@ -167,11 +196,10 @@ def cmd_pick():
             input=os.environ.get("HERDR_SBX_CHOICES", ""), stdout=subprocess.PIPE, text=True)
     except FileNotFoundError:
         raise Abort("fzf is not installed") from None
-    name = out.stdout.split("\t")[0].strip() if out.returncode == 0 else ""
-    result = os.environ["HERDR_SBX_RESULT"]
-    with open(result + ".tmp", "w") as f:
-        f.write(name)
-    os.replace(result + ".tmp", result)
+    result = os.environ.get("HERDR_SBX_RESULT")
+    if not result:
+        raise Abort("the picker is opened by the open action")
+    write_atomic(result, out.stdout.split("\t")[0].strip() if out.returncode == 0 else "")
 
 
 def cmd_open():
@@ -195,8 +223,8 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
-    remember(label, name)
     open_tab(workspace, root, name)
+    remember(label, name)
 
 
 def main(argv):
@@ -208,5 +236,9 @@ def main(argv):
         commands[argv[0]]()
     except Abort as e:
         notify(str(e))
+        return 1
+    except (KeyError, ValueError, TypeError) as e:
+        # Unexpected herdr/sbx output: say so instead of dying silently in the plugin log.
+        notify(f"unexpected error: {e!r}")
         return 1
     return 0

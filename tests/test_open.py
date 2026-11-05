@@ -149,6 +149,26 @@ class OpenSingleSandbox(unittest.TestCase):
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn("sbx", " ".join(note))
 
+    def test_malformed_sbx_output_only_notifies(self):
+        self.f.focused(self.f.repo)
+        self.f.sbx_state.write_text('{"not": "a list"}')
+
+        out = self.f.run("open")
+
+        self.assertEqual(out.stderr, "")
+        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
+    def test_a_sandbox_name_unsafe_for_the_shell_is_refused(self):
+        self.f.focused(self.f.repo)
+        self.f.sandboxes(("app-1; touch pwned", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
 
 class PickAmongSandboxes(unittest.TestCase):
     def setUp(self):

@@ -97,7 +97,7 @@ def primary_workspace(sandbox):
 
 
 def candidates(root):
-    found = [s for s in sandboxes() if primary_workspace(s) == root]
+    found = [s for s in sandboxes() if s.get("agent") == "claude" and primary_workspace(s) == root]
     for s in found:
         if not SANDBOX_NAME.fullmatch(str(s.get("name"))):
             raise Abort(f"unexpected sandbox name: {s.get('name')!r}")
@@ -174,6 +174,9 @@ def pick(found, root):
     """Let the user choose in an overlay. The tab is opened only after the overlay has
     closed, because herdr restores the previous focus when an overlay closes."""
     result = os.path.join(state_dir(), f"pick-{os.getpid()}")
+    # A leftover from a crashed run with the same pid would end the wait before the user picks.
+    if os.path.exists(result):
+        os.remove(result)
     choices = "\n".join(f"{s['name']}\t{s.get('status', '')}" for s in found)
     opened = herdr("plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "picker",
                    "--placement", "overlay", "--focus", "--env", f"HERDR_SBX_CHOICES={choices}",
@@ -185,20 +188,22 @@ def pick(found, root):
         os.remove(result)
     except OSError:
         return None
-    return name or None
+    return name if name in {s["name"] for s in found} else None
 
 
 def cmd_pick():
+    result = os.environ.get("HERDR_SBX_RESULT")
+    if not result:
+        raise Abort("the picker is opened by the open action")
     try:
         out = subprocess.run(
             ["fzf", "--no-sort", "--layout=reverse", "--delimiter=\t", "--prompt=sandbox> ",
              f"--header=Open Claude in a sandbox of {os.environ.get('HERDR_SBX_ROOT', '')}"],
-            input=os.environ.get("HERDR_SBX_CHOICES", ""), stdout=subprocess.PIPE, text=True)
+            input=os.environ.get("HERDR_SBX_CHOICES", ""), stdout=subprocess.PIPE, text=True,
+            # The user's global options (e.g. --print-query) would change what fzf prints.
+            env={**os.environ, "FZF_DEFAULT_OPTS": ""})
     except FileNotFoundError:
         raise Abort("fzf is not installed") from None
-    result = os.environ.get("HERDR_SBX_RESULT")
-    if not result:
-        raise Abort("the picker is opened by the open action")
     write_atomic(result, out.stdout.split("\t")[0].strip() if out.returncode == 0 else "")
 
 
@@ -237,7 +242,7 @@ def main(argv):
     except Abort as e:
         notify(str(e))
         return 1
-    except (KeyError, ValueError, TypeError) as e:
+    except (KeyError, ValueError, TypeError, AttributeError) as e:
         # Unexpected herdr/sbx output: say so instead of dying silently in the plugin log.
         notify(f"unexpected error: {e!r}")
         return 1

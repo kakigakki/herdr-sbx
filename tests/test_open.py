@@ -47,7 +47,8 @@ class Fixture:
 
     def sandboxes(self, *items):
         self.sbx_state.write_text(json.dumps([
-            {"name": name, "status": status, "workspaces": [str(ws)]} for name, ws, status in items]))
+            {"name": name, "agent": agent, "status": status, "workspaces": [str(ws)]}
+            for name, ws, status, *rest in items for agent in [rest[0] if rest else "claude"]]))
 
     def run(self, *args, pick=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
@@ -117,6 +118,16 @@ class OpenSingleSandbox(unittest.TestCase):
         self.f.run("open")
 
         self.assertEqual(len(self.f.herdr_calls("pane", "run")), 1)
+
+    def test_sandboxes_of_other_agents_are_not_candidates(self):
+        self.f.focused(self.f.repo)
+        self.f.sandboxes(("app-codex", self.f.repo, "running", "codex"), ("app-1", self.f.repo, "stopped"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [
+            ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1"]])
 
     def test_no_matching_sandbox_only_notifies(self):
         self.f.focused(self.f.repo)

@@ -394,6 +394,9 @@ class HeadlessLaunch(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
     def test_a_run_without_a_result_leaves_a_note_pointing_at_the_log(self):
+        self.result.parent.mkdir()
+        self.result.write_text("an earlier run's result")
+
         out = self.launch()
 
         self.assertEqual(out.returncode, 0, out.stderr)

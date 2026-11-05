@@ -338,7 +338,11 @@ def run_headless(name, workdir, prompt, log, fetch):
     """Run `claude -p` in the sandbox, detached, then copy each `fetch` file (same path in the VM and on
     the host) back. A file the run did not make gets a note instead, so whoever waits for it is not left hanging."""
     q = shlex.quote
-    steps = [f"sbx exec -i {q(name)} -- bash -c 'cd \"${{1:-.}}\" && exec claude -p' _ {q(workdir)}"
+    steps = []
+    if fetch:
+        # A result left by an earlier run must not pass for this run's.
+        steps.append(f"sbx exec {q(name)} -- rm -f {' '.join(q(p) for p in fetch)}")
+    steps += [f"sbx exec -i {q(name)} -- bash -c 'cd \"${{1:-.}}\" && exec claude -p' _ {q(workdir)}"
              f" < {q(prompt)} > {q(log)} 2>&1",
              f"rm -f {q(prompt)}"]
     for path in fetch:
@@ -359,7 +363,7 @@ def cmd_launch(argv):
     import argparse
     parser = argparse.ArgumentParser(prog="python3 -m herdr_sbx launch")
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--label", required=True, help="the new workspace's label")
+    parser.add_argument("--label", help="the new workspace's label (not with --headless)")
     parser.add_argument("--setup-file", help="bash run in the sandbox first; its last stdout line "
                                              "replaces {{WORKDIR}} in the prompts")
     parser.add_argument("--prompt-file", action="append", required=True, help="one pane per file, left to right")
@@ -370,6 +374,15 @@ def cmd_launch(argv):
     args = parser.parse_args(argv)
     if args.headless and (len(args.prompt_file) != 1 or not args.log):
         parser.error("--headless takes one --prompt-file and --log")
+    if not args.headless and not args.label:
+        parser.error("--label is required")
+    # --fetch means the same path in the VM and on the host, so relative paths would not meet.
+    log, fetch = (os.path.abspath(args.log) if args.log else None), [os.path.abspath(f) for f in args.fetch]
+    for path in fetch:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
     root = repo_root(args.repo)
     try:
         found = candidates(root) if root else []
@@ -389,7 +402,7 @@ def cmd_launch(argv):
             f.write(text)
         prompts.append(prompt)
     if args.headless:
-        run_headless(name, workdir, prompts[0], args.log, args.fetch)
+        run_headless(name, workdir, prompts[0], log, fetch)
         print(name)
         return
     panes = [create_workspace(args.label, name)]
@@ -420,6 +433,7 @@ def main(argv):
         return 1
     except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
         # Unexpected herdr/sbx output: say so instead of dying silently in the plugin log.
+        print(f"unexpected error: {e!r}", file=sys.stderr)
         notify(f"unexpected error: {e!r}")
         return 1
     return 0

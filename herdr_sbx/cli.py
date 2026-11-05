@@ -1,4 +1,4 @@
-"""Find the sbx sandbox of the focused pane's repository and open Claude in it in a new tab.
+"""Find the sbx sandbox of the focused pane's repository and open Claude in it in a split pane.
 
 herdr recognizes an agent by the pane's foreground process, which is `sbx` here, so the
 command carries HERDR_AGENT=claude (https://herdr.dev/tui/docs/agents/#vms-and-sandbox-wrappers).
@@ -115,9 +115,20 @@ def wait_shell_ready(pane, timeout=8.0):
         time.sleep(0.2)
 
 
-def open_tab(workspace, root, name):
-    created = herdr("tab", "create", "--workspace", workspace, "--cwd", root, "--label", name, "--focus")
-    pane = created["root_pane"]["pane_id"]
+def split_direction(origin):
+    try:
+        rect = next(p["rect"] for p in herdr("pane", "layout", "--pane", origin)["layout"]["panes"]
+                    if p["pane_id"] == origin)
+    except (Abort, KeyError, StopIteration):
+        return "down"
+    # Terminal cells are roughly twice as tall as wide.
+    return "right" if rect["width"] > rect["height"] * 2.2 else "down"
+
+
+def open_pane(origin, root, name):
+    split = herdr("pane", "split", origin, "--direction", split_direction(origin), "--cwd", root, "--focus")
+    pane = split["pane"]["pane_id"]
+    herdr("pane", "rename", pane, name, raw=True)
     wait_shell_ready(pane)
     herdr("pane", "run", pane, f"HERDR_AGENT=claude sbx run --name {shlex.quote(name)}", raw=True)
 
@@ -161,7 +172,7 @@ def wait_for_pick(pane, result):
         except Abort:
             return
         time.sleep(0.2)
-    # The tab must open after the overlay is gone (see pick).
+    # The pane must open after the overlay is gone (see pick).
     for _ in range(50):
         try:
             herdr("pane", "get", pane)
@@ -171,7 +182,7 @@ def wait_for_pick(pane, result):
 
 
 def pick(found, root):
-    """Let the user choose in an overlay. The tab is opened only after the overlay has
+    """Let the user choose in an overlay. The pane is opened only after the overlay has
     closed, because herdr restores the previous focus when an overlay closes."""
     result = os.path.join(state_dir(), f"pick-{os.getpid()}")
     # A leftover from a crashed run with the same pid would end the wait before the user picks.
@@ -210,8 +221,9 @@ def cmd_pick():
 def cmd_open():
     ctx = context()
     workspace = ctx.get("workspace_id")
+    origin = ctx.get("focused_pane_id")
     cwd = focused_cwd(ctx)
-    if not workspace or not cwd:
+    if not workspace or not origin or not cwd:
         raise Abort("no focused pane")
     root = repo_root(cwd)
     if root is None:
@@ -228,7 +240,7 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
-    open_tab(workspace, root, name)
+    open_pane(origin, root, name)
     remember(label, name)
 
 

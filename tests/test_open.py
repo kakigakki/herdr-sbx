@@ -40,8 +40,9 @@ class Fixture:
     def herdr(self, state):
         self.herdr_state.write_text(json.dumps(state))
 
-    def focused(self, cwd, *, workspace="w1", label="app", pane="w1:p1"):
-        self.herdr({"panes": {pane: {"pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd)}}})
+    def focused(self, cwd, *, workspace="w1", label="app", pane="w1:p1", size=(240, 60)):
+        self.herdr({"panes": {pane: {"pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd)}},
+                    "rects": {pane: {"width": size[0], "height": size[1], "x": 0, "y": 0}}})
         self.context = {"workspace_id": workspace, "workspace_label": label, "focused_pane_id": pane,
                         "focused_pane_cwd": str(cwd), "invocation_source": "keybinding"}
 
@@ -78,18 +79,28 @@ class OpenSingleSandbox(unittest.TestCase):
         self.f = Fixture()
         self.addCleanup(self.f.tmp.cleanup)
 
-    def test_opens_the_only_matching_sandbox_in_a_new_tab_with_the_agent_hint(self):
+    def test_opens_the_only_matching_sandbox_in_a_split_pane_with_the_agent_hint(self):
         self.f.focused(self.f.repo)
         self.f.sandboxes(("app-1", self.f.repo, "running"), ("other-1", self.f.root / "other", "running"))
 
         out = self.f.run("open")
 
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [[
-            "tab", "create", "--workspace", "w1", "--cwd", str(self.f.repo), "--label", "app-1", "--focus"]])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [[
+            "pane", "split", "w1:p1", "--direction", "right", "--cwd", str(self.f.repo), "--focus"]])
+        self.assertEqual(self.f.herdr_calls("pane", "rename"), [["pane", "rename", "w1:p9", "app-1"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [
             ["pane", "run", "w1:p9", "HERDR_AGENT=claude sbx run --name app-1"]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
+
+    def test_a_narrow_pane_is_split_downward(self):
+        self.f.focused(self.f.repo, size=(100, 60))
+        self.f.sandboxes(("app-1", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        [split] = self.f.herdr_calls("pane", "split")
+        self.assertEqual(split[split.index("--direction") + 1], "down")
 
     def test_a_linked_worktree_resolves_to_the_main_repository(self):
         wt = self.f.worktree("app-pr-1")
@@ -135,7 +146,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn(str(self.f.repo), " ".join(note))
         self.assertEqual([c for c in self.f.calls("sbx") if c[:1] != ["ls"]], [])
@@ -148,7 +159,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
     def test_sbx_failure_only_notifies(self):
@@ -156,7 +167,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         [note] = self.f.herdr_calls("notification", "show")
         self.assertIn("sbx", " ".join(note))
 
@@ -167,7 +178,7 @@ class OpenSingleSandbox(unittest.TestCase):
         out = self.f.run("open")
 
         self.assertEqual(out.stderr, "")
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
     def test_a_sandbox_name_unsafe_for_the_shell_is_refused(self):
@@ -176,7 +187,7 @@ class OpenSingleSandbox(unittest.TestCase):
 
         self.f.run("open")
 
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
@@ -210,7 +221,7 @@ class PickAmongSandboxes(unittest.TestCase):
         out = self.f.run("open")
 
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(self.f.herdr_calls("tab", "create"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
     def test_the_last_choice_of_the_workspace_comes_first_next_time(self):

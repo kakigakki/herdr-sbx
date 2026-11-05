@@ -1,6 +1,6 @@
 # herdr-sbx
 
-A [herdr](https://herdr.dev) plugin that opens Claude Code inside the [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) of the current workspace's repository, in a new tab, with herdr's agent detection working.
+A [herdr](https://herdr.dev) plugin that opens Claude Code inside the [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) of the current workspace's repository, in a split pane, with herdr's agent detection working.
 
 ## Why
 
@@ -15,7 +15,7 @@ Press the key in any pane of a repository:
    - One: it opens right away.
    - Several: an fzf picker opens. Running ones come first, and the one you picked last time in this workspace (by label) comes first of all.
    - None: a notification says so. **The plugin never creates sandboxes** (create them with `sbx` or your project's own script).
-3. A new tab named after the sandbox opens in the current workspace and runs `HERDR_AGENT=claude sbx run --name <sandbox>`.
+3. The focused pane is split (to the right when it is wide, otherwise downward), and the new pane, named after the sandbox, runs `HERDR_AGENT=claude sbx run --name <sandbox>`.
 
 ## Requirements
 

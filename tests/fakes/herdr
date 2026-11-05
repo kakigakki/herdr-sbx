@@ -31,11 +31,14 @@ elif args[:3] == ["plugin", "pane", "open"]:
     subprocess.run(["sh", "scripts/picker.sh"], env=env, stdout=subprocess.DEVNULL)
     ok({"type": "plugin_pane_opened", "plugin_pane": {"plugin_id": "herdr-sbx", "entrypoint": "picker",
                                                       "pane": {"pane_id": "w1:p8"}}})
-elif args[:2] == ["tab", "create"]:
-    ok({"type": "tab_created", "tab": {"tab_id": "w1:t9"}, "root_pane": {"pane_id": "w1:p9"}})
+elif args[:2] == ["pane", "layout"]:
+    pane = args[args.index("--pane") + 1]
+    ok({"type": "pane_layout", "layout": {"panes": [{"pane_id": pane, "rect": state["rects"][pane]}]}})
+elif args[:2] == ["pane", "split"]:
+    ok({"type": "pane_split", "pane": {"pane_id": "w1:p9"}})
 elif args[:2] == ["pane", "read"]:
     print("$ ")
-elif args[:2] in (["pane", "run"], ["notification", "show"]):
+elif args[:2] in (["pane", "run"], ["pane", "rename"], ["notification", "show"]):
     pass  # the real herdr prints nothing on success
 else:
     print(json.dumps({"error": {"code": "unknown_command", "args": args}}))

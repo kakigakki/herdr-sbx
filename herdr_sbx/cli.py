@@ -334,9 +334,28 @@ def run_setup(name, setup_file):
     return lines[-1].strip() if lines else ""
 
 
+def run_headless(name, workdir, prompt, log, fetch):
+    """Run `claude -p` in the sandbox, detached, then copy each `fetch` file (same path in the VM and on
+    the host) back. A file the run did not make gets a note instead, so whoever waits for it is not left hanging."""
+    q = shlex.quote
+    steps = [f"sbx exec -i {q(name)} -- bash -c 'cd \"${{1:-.}}\" && exec claude -p' _ {q(workdir)}"
+             f" < {q(prompt)} > {q(log)} 2>&1",
+             f"rm -f {q(prompt)}"]
+    for path in fetch:
+        part = q(path + ".part")
+        note = q(f"{name}: {path} was not written; see {log}")
+        # Written whole, then renamed: the file appearing means it is complete.
+        steps.append(f"mkdir -p {q(os.path.dirname(path))}; "
+                     f"sbx exec {q(name)} -- cat {q(path)} > {part} 2>/dev/null || echo {note} > {part}; "
+                     f"mv {part} {q(path)}")
+    subprocess.Popen(["sh", "-c", "; ".join(steps)], start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def cmd_launch(argv):
     """Start Claude with given prompts in a sandbox of the repository, in a workspace of its own.
-    For scripts that used to start Claude on the host (PR review, watch, CI fix)."""
+    For scripts that used to start Claude on the host (PR review, watch, CI fix).
+    With --headless, no workspace: one `claude -p` runs in the background (for agents that only want the result)."""
     import argparse
     parser = argparse.ArgumentParser(prog="python3 -m herdr_sbx launch")
     parser.add_argument("--repo", required=True)
@@ -344,7 +363,13 @@ def cmd_launch(argv):
     parser.add_argument("--setup-file", help="bash run in the sandbox first; its last stdout line "
                                              "replaces {{WORKDIR}} in the prompts")
     parser.add_argument("--prompt-file", action="append", required=True, help="one pane per file, left to right")
+    parser.add_argument("--headless", action="store_true", help="run the one prompt with claude -p, no workspace")
+    parser.add_argument("--log", help="--headless: where claude -p's output goes")
+    parser.add_argument("--fetch", action="append", default=[], help="--headless: a file the run writes in the VM, "
+                                                                      "copied to the same path on the host after it")
     args = parser.parse_args(argv)
+    if args.headless and (len(args.prompt_file) != 1 or not args.log):
+        parser.error("--headless takes one --prompt-file and --log")
     root = repo_root(args.repo)
     try:
         found = candidates(root) if root else []
@@ -363,6 +388,10 @@ def cmd_launch(argv):
         with os.fdopen(fd, "w") as f:
             f.write(text)
         prompts.append(prompt)
+    if args.headless:
+        run_headless(name, workdir, prompts[0], args.log, args.fetch)
+        print(name)
+        return
     panes = [create_workspace(args.label, name)]
     for _ in prompts[1:]:
         panes.append(herdr("pane", "split", panes[0], "--direction", "right", "--ratio", "0.6",
@@ -386,6 +415,7 @@ def main(argv):
         print(e, file=sys.stderr)
         return 3
     except Abort as e:
+        print(e, file=sys.stderr)  # for script callers, which see no notification
         notify(str(e))
         return 1
     except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:

@@ -33,7 +33,9 @@ python3 -m herdr_sbx launch --repo <dir> --label "🔍app#7" \
 - Picks the repository's Claude sandbox without asking (running first, then by name).
 - Runs `setup.sh` inside the sandbox first (`sbx exec`, e.g. to check out a PR into a worktree in the VM); its last line of output replaces `{{WORKDIR}}` in the prompt files.
 - Opens a workspace with that label and one Claude per prompt file (`sbx run --name <sandbox> -- "<prompt>"`), the second one split to the right.
-- Exits with **3** when the repository has no sandbox, so the caller can fall back to running Claude another way. Other failures are shown as notifications.
+- Exits with **3** when the repository has no sandbox, so the caller can fall back to running Claude another way. Other failures are shown as notifications (and printed to stderr).
+
+When only the result matters (for example an agent waiting for a review file), add `--headless --log <file> [--fetch <file>]...` with a single prompt file: no workspace opens; `claude -p` runs in the sandbox in the background, its output goes to the log, and each `--fetch` file is copied from the VM to the same path on the host when it ends. A file the run did not write becomes a one-line note pointing at the log, so a waiting caller is never left hanging.
 
 ## Requirements
 

@@ -17,9 +17,9 @@ Press the key:
   - If the sandbox already has its workspace, herdr switches to it. Otherwise the workspace is created and Claude starts in it with `HERDR_AGENT=claude sbx run --name <sandbox>`.
 - **In a sandbox's workspace**: the focused pane is split (to the right when wide, otherwise downward) and one more Claude starts in the same sandbox.
 
-When Claude exits, its pane closes; when the last one closes, the workspace goes away. The sandbox itself keeps running.
+When Claude exits normally, its pane closes (if `sbx run` fails, the pane stays so you can read the error); when the last one closes, the workspace goes away. The sandbox itself keeps running.
 
-The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token, not by their label.
+The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label.
 
 ## Requirements
 

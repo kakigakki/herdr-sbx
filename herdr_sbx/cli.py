@@ -13,6 +13,8 @@ import time
 PLUGIN_ID = "herdr-sbx"
 # sbx's own naming rule. The name is typed into a host shell, so anything else is refused.
 SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
+# Workspace token marking a sandbox's workspace. Namespaced: herdr merges tokens of all sources.
+TOKEN = "herdr_sbx"
 
 
 class Abort(Exception):
@@ -136,7 +138,8 @@ def sandbox_dir(name):
 def start_claude(pane, name):
     wait_shell_ready(pane)
     # When Claude ends, close the pane; closing the last one removes the sandbox's workspace.
-    command = f'HERDR_AGENT=claude sbx run --name {shlex.quote(name)}; herdr pane close "$HERDR_PANE_ID"'
+    # `&&`: when sbx fails (daemon down, sandbox removed) the pane stays so the error can be read.
+    command = f'HERDR_AGENT=claude sbx run --name {shlex.quote(name)} && herdr pane close "$HERDR_PANE_ID"'
     herdr("pane", "run", pane, command, raw=True)
 
 
@@ -144,7 +147,11 @@ def open_workspace(name):
     created = herdr("workspace", "create", "--cwd", sandbox_dir(name), "--label", name, "--focus")
     workspace = created["workspace"]["workspace_id"]
     # The token, not the label, identifies the sandbox's workspace: labels can be renamed.
-    herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"sbx={name}", raw=True)
+    try:
+        herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"{TOKEN}={name}",
+              raw=True)
+    except Abort:
+        pass  # still recognized by its cwd (sandbox_from_cwd)
     start_claude(created["root_pane"]["pane_id"], name)
 
 
@@ -240,7 +247,15 @@ def cmd_pick():
 
 
 def sandbox_of(workspace):
-    return (workspace.get("tokens") or {}).get("sbx")
+    return (workspace.get("tokens") or {}).get(TOKEN)
+
+
+def sandbox_from_cwd(cwd):
+    """Fallback for a sandbox's workspace whose token is gone (e.g. after a herdr restart)."""
+    if not cwd:
+        return None
+    parent, name = os.path.split(os.path.realpath(cwd))
+    return name if parent == os.path.realpath(os.path.join(state_dir(), "ws")) else None
 
 
 def cmd_open():
@@ -250,14 +265,16 @@ def cmd_open():
     if not workspace or not origin:
         raise Abort("no focused pane")
     workspaces = herdr("workspace", "list")["workspaces"]
-    here = sandbox_of(next((w for w in workspaces if w["workspace_id"] == workspace), {}))
+    cwd = focused_cwd(ctx)
+    here = sandbox_of(next((w for w in workspaces if w["workspace_id"] == workspace), {})) or sandbox_from_cwd(cwd)
     if here:
         # Inside a sandbox's workspace: one more Claude in the same sandbox.
         if not SANDBOX_NAME.fullmatch(here):
             raise Abort(f"unexpected sandbox name: {here!r}")
+        if here not in {s.get("name") for s in sandboxes()}:
+            raise Abort(f"sandbox {here} no longer exists (sbx ls)")
         add_claude(origin, here)
         return
-    cwd = focused_cwd(ctx)
     if not cwd:
         raise Abort("no focused pane")
     root = repo_root(cwd)
@@ -293,7 +310,7 @@ def main(argv):
     except Abort as e:
         notify(str(e))
         return 1
-    except (KeyError, ValueError, TypeError, AttributeError) as e:
+    except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
         # Unexpected herdr/sbx output: say so instead of dying silently in the plugin log.
         notify(f"unexpected error: {e!r}")
         return 1

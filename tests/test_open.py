@@ -17,7 +17,7 @@ def git(*args, cwd):
 
 
 def launch(name):
-    return f'HERDR_AGENT=claude sbx run --name {name}; herdr pane close "$HERDR_PANE_ID"'
+    return f'HERDR_AGENT=claude sbx run --name {name} && herdr pane close "$HERDR_PANE_ID"'
 
 
 class Fixture:
@@ -47,7 +47,7 @@ class Fixture:
 
     def sandbox_workspace(self, name, workspace_id="w5"):
         """An existing workspace this plugin made for sandbox `name`."""
-        self.workspaces.append({"workspace_id": workspace_id, "label": name, "tokens": {"sbx": name}})
+        self.workspaces.append({"workspace_id": workspace_id, "label": name, "tokens": {"herdr_sbx": name}})
 
     def focused(self, cwd, *, workspace="w1", label="app", pane="w1:p1", size=(240, 60)):
         self.herdr({"panes": {pane: {"pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd)}},
@@ -84,7 +84,7 @@ class Fixture:
 
     def launched(self):
         """Sandbox names started with `pane run`, in order."""
-        return [c[3].split("--name ")[1].split(";")[0] for c in self.herdr_calls("pane", "run")]
+        return [c[3].split("--name ")[1].split(" ")[0] for c in self.herdr_calls("pane", "run")]
 
 
 class OpenSandboxWorkspace(unittest.TestCase):
@@ -104,7 +104,7 @@ class OpenSandboxWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "app-1", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "sbx=app-1"]])
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
@@ -136,11 +136,42 @@ class OpenSandboxWorkspace(unittest.TestCase):
     def test_a_narrow_pane_is_split_downward(self):
         self.f.sandbox_workspace("app-1")
         self.f.focused(self.f.repo, workspace="w5", pane="w5:p1", size=(100, 60))
+        self.f.sandboxes(("app-1", self.f.repo, "running"))
 
         self.f.run("open")
 
         [split] = self.f.herdr_calls("pane", "split")
         self.assertEqual(split[split.index("--direction") + 1], "down")
+
+    def test_without_its_token_a_sandbox_workspace_is_recognized_by_its_directory(self):
+        self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w7", label="app-2", pane="w7:p1")
+        self.f.sandboxes(("app-1", self.f.repo, "running"), ("app-2", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
+        self.assertEqual(self.f.launched(), ["app-2"])
+
+    def test_a_removed_sandbox_is_not_started_from_its_workspace(self):
+        self.f.sandbox_workspace("app-2")
+        self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w5", label="app-2", pane="w5:p1")
+        self.f.sandboxes(("app-1", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("pane", "split"), [])
+        [note] = self.f.herdr_calls("notification", "show")
+        self.assertIn("app-2", " ".join(note))
+
+    def test_an_unsafe_name_in_the_workspace_token_is_refused(self):
+        self.f.sandbox_workspace("app-1; touch pwned")
+        self.f.focused(self.f.repo, workspace="w5", pane="w5:p1")
+        self.f.sandboxes(("app-1", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
 
     def test_a_linked_worktree_resolves_to_the_main_repository(self):
         wt = self.f.worktree("app-pr-1")

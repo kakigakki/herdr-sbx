@@ -407,6 +407,14 @@ class StartByName(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(self.f.calls("sbx"), [])
 
+    def test_outside_a_plugin_action_it_uses_the_state_directory_herdr_gives_the_plugin(self):
+        xdg = self.f.root / "xdg"
+
+        self.f.run("start", "app-1", extra_env={"HERDR_PLUGIN_STATE_DIR": "", "XDG_STATE_HOME": str(xdg)})
+
+        [create] = self.f.herdr_calls("workspace", "create")
+        self.assertEqual(create[3], str(xdg / "herdr" / "plugins" / "herdr-sbx" / "ws" / "app-1"))
+
     def test_the_sandbox_name_is_required(self):
         self.assertEqual(self.f.run("start").returncode, 2)
         self.assertEqual(self.f.run("start", "a", "b").returncode, 2)

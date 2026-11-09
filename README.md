@@ -31,7 +31,7 @@ python3 -m herdr_sbx start <sandbox>
 
 The sandbox's workspace is focused, or created with Claude started in it, and the command returns. It exits with **3** when there is no Claude sandbox of that name (or no `sbx`), so the caller can run `sbx run` itself.
 
-To catch such commands without changing them, put a small `sbx` wrapper first on `PATH` that hands exactly `sbx run --name <sandbox>`, typed in a herdr pane, to `start` and passes everything else to the real `sbx`. Skip it when `HERDR_AGENT` is set: that is this plugin's own `sbx run`.
+To catch such commands without changing them, put a small `sbx` wrapper first on `PATH` that hands exactly `sbx run --name <sandbox>`, typed at a terminal in a herdr pane, to `start` (falling back to the real `sbx` on exit 3) and passes everything else to the real `sbx`. Skip it when `HERDR_AGENT` is set: that is this plugin's own `sbx run`.
 
 ## Starting Claude with a prompt from scripts (`launch`)
 

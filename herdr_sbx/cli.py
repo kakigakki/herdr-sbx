@@ -28,7 +28,7 @@ class SbxMissing(Abort):
 
 
 class NoSandbox(Exception):
-    """launch: the repository has no sandbox; the caller falls back to its host mode (exit 3)."""
+    """launch / start: no sandbox to use; the caller falls back to running Claude another way (exit 3)."""
 
 
 def herdr(*args, raw=False):
@@ -183,8 +183,8 @@ def add_claude(origin, name):
 def state_dir():
     # Outside a plugin action (launch, start), use the directory herdr gives the plugin, so that
     # workspaces made either way are recognized by their directory (sandbox_from_cwd).
-    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.join(
-        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "herdr", "plugins", PLUGIN_ID)
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.join(base, "herdr", "plugins", PLUGIN_ID)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -326,10 +326,12 @@ def focus_or_open(name, workspaces):
         open_workspace(name)
 
 
-def cmd_start(name):
-    """`start <sandbox>`: what the key does for that sandbox, for a host command that would otherwise
-    run `sbx run --name <sandbox>` in its own pane (outside a sandbox's workspace, unseen as an agent).
-    Exits 3 when it is not a Claude sandbox, so the caller can run sbx itself."""
+def cmd_start(argv):
+    """What the key does for the named sandbox, for host commands that would run `sbx run --name` in their pane."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="python3 -m herdr_sbx start")
+    parser.add_argument("sandbox")
+    name = parser.parse_args(argv).sandbox
     if not SANDBOX_NAME.fullmatch(name):
         raise Abort(f"unexpected sandbox name: {name!r}")
     try:
@@ -437,15 +439,13 @@ def cmd_launch(argv):
 
 def main(argv):
     commands = {"open": cmd_open, "pick": cmd_pick, "launch": cmd_launch, "start": cmd_start}
-    arity = {"launch": None, "start": 2}
-    if not argv or argv[0] not in commands or arity.get(argv[0], 1) not in (None, len(argv)):
+    with_args = ("launch", "start")  # parse their own arguments
+    if not argv or argv[0] not in commands or (argv[0] not in with_args and len(argv) != 1):
         print(f"usage: python3 -m herdr_sbx {{{'|'.join(commands)}}}")
         return 2
     try:
-        if argv[0] == "launch":
-            cmd_launch(argv[1:])
-        elif argv[0] == "start":
-            cmd_start(argv[1])
+        if argv[0] in with_args:
+            commands[argv[0]](argv[1:])
         else:
             commands[argv[0]]()
     except NoSandbox as e:

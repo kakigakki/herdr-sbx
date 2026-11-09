@@ -28,7 +28,7 @@ class SbxMissing(Abort):
 
 
 class NoSandbox(Exception):
-    """launch: the repository has no sandbox; the caller falls back to its host mode (exit 3)."""
+    """launch / start: no sandbox to use; the caller falls back to running Claude another way (exit 3)."""
 
 
 def herdr(*args, raw=False):
@@ -137,10 +137,11 @@ def split_direction(origin):
         return "down"
 
 
-def sandbox_dir(label):
+def sandbox_dir(label, kind="ws"):
     """The cwd of a workspace this plugin makes. Named after the workspace's label, so tools that
-    name a workspace after its working directory (e.g. auto-namer) keep that label."""
-    path = os.path.join(state_dir(), "ws", label.replace("/", "-"))
+    name a workspace after its working directory (e.g. auto-namer) keep that label.
+    `ws` holds a sandbox's own workspaces (label = sandbox name, see sandbox_from_cwd); `tasks` those of launch."""
+    path = os.path.join(state_dir(), kind, label.replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -157,9 +158,9 @@ def start_claude(pane, name, prompt_file=None):
     herdr("pane", "run", pane, command + ' && herdr pane close "$HERDR_PANE_ID"', raw=True)
 
 
-def create_workspace(label, name):
+def create_workspace(label, name, kind="ws"):
     """A focused workspace for sandbox `name`; returns its root pane."""
-    created = herdr("workspace", "create", "--cwd", sandbox_dir(label), "--label", label, "--focus")
+    created = herdr("workspace", "create", "--cwd", sandbox_dir(label, kind), "--label", label, "--focus")
     workspace = created["workspace"]["workspace_id"]
     # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
@@ -181,8 +182,10 @@ def add_claude(origin, name):
 
 
 def state_dir():
-    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.join(
-        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), PLUGIN_ID)
+    # Outside a plugin action (launch, start), use the directory herdr gives the plugin, so that
+    # workspaces made either way are recognized by their directory (sandbox_from_cwd).
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    path = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.join(base, "herdr", "plugins", PLUGIN_ID)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -311,13 +314,34 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
+    focus_or_open(name, workspaces)
+    remember(label, name)
+
+
+def focus_or_open(name, workspaces):
     # The sandbox's own workspace, not one `launch` made for a task in the same sandbox.
     existing = next((w for w in workspaces if sandbox_of(w) == name and w.get("label") == name), None)
     if existing:
         herdr("workspace", "focus", existing["workspace_id"], raw=True)
     else:
         open_workspace(name)
-    remember(label, name)
+
+
+def cmd_start(argv):
+    """What the key does for the named sandbox, for host commands that would run `sbx run --name` in their pane."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="python3 -m herdr_sbx start")
+    parser.add_argument("sandbox")
+    name = parser.parse_args(argv).sandbox
+    if not SANDBOX_NAME.fullmatch(name):
+        raise Abort(f"unexpected sandbox name: {name!r}")
+    try:
+        found = sandboxes()
+    except SbxMissing as e:
+        raise NoSandbox(str(e)) from None
+    if not any(s.get("name") == name and s.get("agent") == "claude" for s in found):
+        raise NoSandbox(f"no Claude sandbox named {name} (sbx ls)")
+    focus_or_open(name, herdr("workspace", "list")["workspaces"])
 
 
 def run_setup(name, setup_file):
@@ -405,23 +429,24 @@ def cmd_launch(argv):
         run_headless(name, workdir, prompts[0], log, fetch)
         print(name)
         return
-    panes = [create_workspace(args.label, name)]
+    panes = [create_workspace(args.label, name, "tasks")]
     for _ in prompts[1:]:
         panes.append(herdr("pane", "split", panes[0], "--direction", "right", "--ratio", "0.6",
-                           "--cwd", sandbox_dir(args.label), "--no-focus")["pane"]["pane_id"])
+                           "--cwd", sandbox_dir(args.label, "tasks"), "--no-focus")["pane"]["pane_id"])
     for pane, prompt in zip(panes, prompts):
         start_claude(pane, name, prompt)
     print(name)
 
 
 def main(argv):
-    commands = {"open": cmd_open, "pick": cmd_pick, "launch": cmd_launch}
-    if not argv or argv[0] not in commands or (argv[0] != "launch" and len(argv) != 1):
+    commands = {"open": cmd_open, "pick": cmd_pick, "launch": cmd_launch, "start": cmd_start}
+    with_args = ("launch", "start")  # parse their own arguments
+    if not argv or argv[0] not in commands or (argv[0] not in with_args and len(argv) != 1):
         print(f"usage: python3 -m herdr_sbx {{{'|'.join(commands)}}}")
         return 2
     try:
-        if argv[0] == "launch":
-            cmd_launch(argv[1:])
+        if argv[0] in with_args:
+            commands[argv[0]](argv[1:])
         else:
             commands[argv[0]]()
     except NoSandbox as e:

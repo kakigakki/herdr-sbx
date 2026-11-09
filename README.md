@@ -19,7 +19,7 @@ Press the key:
 
 When Claude exits normally, its pane closes (if `sbx run` fails, the pane stays so you can read the error); when the last one closes, the workspace goes away. The sandbox itself keeps running.
 
-The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label.
+The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label. Versions before `start` kept `launch`'s directories in `~/.local/state/herdr-sbx`; it is no longer used and can be removed.
 
 ## Opening a sandbox by name (`start`)
 

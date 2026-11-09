@@ -137,10 +137,11 @@ def split_direction(origin):
         return "down"
 
 
-def sandbox_dir(label):
+def sandbox_dir(label, kind="ws"):
     """The cwd of a workspace this plugin makes. Named after the workspace's label, so tools that
-    name a workspace after its working directory (e.g. auto-namer) keep that label."""
-    path = os.path.join(state_dir(), "ws", label.replace("/", "-"))
+    name a workspace after its working directory (e.g. auto-namer) keep that label.
+    `ws` holds a sandbox's own workspaces (label = sandbox name, see sandbox_from_cwd); `tasks` those of launch."""
+    path = os.path.join(state_dir(), kind, label.replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -157,9 +158,9 @@ def start_claude(pane, name, prompt_file=None):
     herdr("pane", "run", pane, command + ' && herdr pane close "$HERDR_PANE_ID"', raw=True)
 
 
-def create_workspace(label, name):
+def create_workspace(label, name, kind="ws"):
     """A focused workspace for sandbox `name`; returns its root pane."""
-    created = herdr("workspace", "create", "--cwd", sandbox_dir(label), "--label", label, "--focus")
+    created = herdr("workspace", "create", "--cwd", sandbox_dir(label, kind), "--label", label, "--focus")
     workspace = created["workspace"]["workspace_id"]
     # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
@@ -428,10 +429,10 @@ def cmd_launch(argv):
         run_headless(name, workdir, prompts[0], log, fetch)
         print(name)
         return
-    panes = [create_workspace(args.label, name)]
+    panes = [create_workspace(args.label, name, "tasks")]
     for _ in prompts[1:]:
         panes.append(herdr("pane", "split", panes[0], "--direction", "right", "--ratio", "0.6",
-                           "--cwd", sandbox_dir(args.label), "--no-focus")["pane"]["pane_id"])
+                           "--cwd", sandbox_dir(args.label, "tasks"), "--no-focus")["pane"]["pane_id"])
     for pane, prompt in zip(panes, prompts):
         start_claude(pane, name, prompt)
     print(name)

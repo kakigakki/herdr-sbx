@@ -162,6 +162,16 @@ class OpenSandboxWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
         self.assertEqual(self.f.launched(), ["app-2"])
 
+    def test_without_its_token_a_launch_workspace_is_not_taken_for_a_sandbox(self):
+        # Its directory is named after its label, which may be another sandbox's name.
+        self.f.focused(self.f.plugin_state / "tasks" / "app-2", workspace="w7", label="app-2", pane="w7:p1")
+        self.f.sandboxes(("app-1", self.f.repo, "running"), ("app-2", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
     def test_a_removed_sandbox_is_not_started_from_its_workspace(self):
         self.f.sandbox_workspace("app-2")
         self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w5", label="app-2", pane="w5:p1")
@@ -299,7 +309,7 @@ class Launch(unittest.TestCase):
 
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip(), "app-2")
-        ws_dir = self.f.plugin_state / "ws" / "🔍app#7"
+        ws_dir = self.f.plugin_state / "tasks" / "🔍app#7"
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "🔍app#7", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [

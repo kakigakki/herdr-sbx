@@ -441,8 +441,12 @@ class HeadlessLaunch(unittest.TestCase):
                           "--fetch", str(self.result), extra_env=env)
 
     def wait_for_result(self):
+        # The fake VM shares the host's paths, so the file exists as soon as Claude writes it: wait for
+        # the fetch (cat, then the rename of .part) to finish too, or the test races the background run.
+        fetched = ["exec", "app-2", "--", "cat", str(self.result)]
+        part = Path(str(self.result) + ".part")
         for _ in range(100):
-            if self.result.exists():
+            if self.result.exists() and fetched in self.f.calls("sbx") and not part.exists():
                 return self.result.read_text()
             time.sleep(0.1)
         self.fail("the result was never fetched")

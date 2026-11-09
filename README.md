@@ -21,6 +21,18 @@ When Claude exits normally, its pane closes (if `sbx run` fails, the pane stays 
 
 The workspace's working directory is an empty directory named after the sandbox in the plugin's state dir, so plugins that name workspaces after their directory (such as auto-namer) keep the sandbox's name. The plugin recognizes its workspaces by a workspace token (or, if that is lost, by that directory), not by their label.
 
+## Opening a sandbox by name (`start`)
+
+A host command that would run `sbx run --name <sandbox>` in its own pane (a project's "open the sandbox" script, for example) can get what the key does instead:
+
+```sh
+python3 -m herdr_sbx start <sandbox>
+```
+
+The sandbox's workspace is focused, or created with Claude started in it, and the command returns. It exits with **3** when there is no Claude sandbox of that name (or no `sbx`), so the caller can run `sbx run` itself.
+
+To catch such commands without changing them, put a small `sbx` wrapper first on `PATH` that hands exactly `sbx run --name <sandbox>`, typed in a herdr pane, to `start` and passes everything else to the real `sbx`. Skip it when `HERDR_AGENT` is set: that is this plugin's own `sbx run`.
+
 ## Starting Claude with a prompt from scripts (`launch`)
 
 Scripts that used to start Claude on the host (a PR review, a watcher, a CI fix) can start it in a sandbox instead:

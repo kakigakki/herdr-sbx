@@ -350,6 +350,68 @@ class Launch(unittest.TestCase):
         self.assertEqual(self.f.launched(), ["app-2"])
 
 
+class StartByName(unittest.TestCase):
+    """`start <sandbox>`: what a host command that would run `sbx run --name <sandbox>` calls instead."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.f.sandboxes(("app-1", self.f.repo, "stopped"), ("codex-1", self.f.repo, "running", "codex"))
+
+    def test_opens_the_sandbox_workspace_with_claude_like_the_key(self):
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [
+            ["workspace", "create", "--cwd", str(self.f.plugin_state / "ws" / "app-1"), "--label", "app-1",
+             "--focus"]])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
+
+    def test_an_existing_sandbox_workspace_is_only_focused(self):
+        self.f.sandbox_workspace("app-1")
+        self.f.herdr({})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+
+    def test_a_workspace_launch_made_in_the_same_sandbox_is_not_reused(self):
+        self.f.workspaces.append({"workspace_id": "w6", "label": "🔍app#7", "tokens": {"herdr_sbx": "app-1"}})
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [])
+        self.assertEqual(self.f.launched(), ["app-1"])
+
+    def test_an_unknown_or_non_claude_sandbox_exits_3_for_the_caller_to_run_sbx(self):
+        for name in ("missing-1", "codex-1"):
+            with self.subTest(name=name):
+                out = self.f.run("start", name)
+
+                self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertEqual(self.f.herdr_calls(), [])
+
+    def test_without_sbx_installed_it_also_exits_3(self):
+        out = self.f.run("start", "app-1", without_sbx=True)
+
+        self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertEqual(self.f.herdr_calls(), [])
+
+    def test_a_name_unsafe_for_the_shell_is_refused(self):
+        out = self.f.run("start", "app-1; touch pwned")
+
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+        self.assertEqual(self.f.calls("sbx"), [])
+
+    def test_the_sandbox_name_is_required(self):
+        self.assertEqual(self.f.run("start").returncode, 2)
+        self.assertEqual(self.f.run("start", "a", "b").returncode, 2)
+
+
 class HeadlessLaunch(unittest.TestCase):
     """`launch --headless`: Claude runs in the sandbox without a workspace (mainline's own-PR review)."""
 

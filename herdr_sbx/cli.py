@@ -225,8 +225,12 @@ def empty_checkout(root, name):
     worktree workspaces under their repository's workspace. None when git cannot make one."""
     path = checkout_dir(name)
     if os.path.exists(path):
-        # Made by an earlier run (same git dir; repo_root would not do for a submodule). Anything else is left alone.
-        return path if common_dir(path) == common_dir(root) else None
+        # Made by an earlier run (same git dir; repo_root would not do for a submodule). Anything else is left alone,
+        # but said: otherwise the sandbox would silently never nest again.
+        if common_dir(path) == common_dir(root):
+            return path
+        notify(f"{path} is not an empty checkout of {root}; remove it to nest {name} under its repository")
+        return None
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # --no-checkout also keeps the repository's post-checkout hook from running. -f: the directory of an
@@ -274,7 +278,7 @@ def place_after_group(workspace, parent):
             i += 1
         api("workspace.move_block", {"workspace_ids": [workspace],
                                      "before_workspace_id": ids[i] if i < len(ids) else None})
-    except (Abort, OSError, KeyError, ValueError, AttributeError):
+    except (Abort, OSError, KeyError, ValueError, TypeError, AttributeError):
         pass
 
 

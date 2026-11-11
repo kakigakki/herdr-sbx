@@ -652,6 +652,8 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
         self.assertEqual((self.checkout / "keep.txt").read_text(), "mine")
         self.assertEqual(len(self.f.herdr_calls("workspace", "create")), 1)
+        [note] = self.f.herdr_calls("notification", "show")
+        self.assertIn(str(self.checkout), " ".join(note))
 
     def test_without_a_reachable_socket_it_still_opens_nested(self):
         self.server.close()

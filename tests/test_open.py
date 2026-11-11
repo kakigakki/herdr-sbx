@@ -677,6 +677,26 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         [opened] = self.f.herdr_calls("worktree", "open")
         self.assertEqual(opened[:4], ["worktree", "open", "--workspace", "w1"])
 
+    def test_a_pane_in_a_subdirectory_also_finds_the_parent_but_the_root_comes_first(self):
+        del self.f.workspaces[0]["worktree"]
+        self.f.workspaces.insert(0, {"workspace_id": "w2", "label": "app-src"})
+        self.f.workspaces.append({"workspace_id": "w3", "label": "other-repo",
+                                  "worktree": {"checkout_path": str(self.f.root / "other")}})
+        src = self.f.repo / "src"
+        src.mkdir()
+        panes = {"w2:p1": {"pane_id": "w2:p1", "workspace_id": "w2", "cwd": str(src)},
+                 "w3:p1": {"pane_id": "w3:p1", "workspace_id": "w3", "cwd": str(self.f.repo)}}
+        self.f.herdr({"panes": panes})
+
+        self.f.run("start", "app-1")
+        [opened] = self.f.herdr_calls("worktree", "open")
+        self.assertEqual(opened[3], "w2")  # w3 is in the root but herdr knows it as another checkout
+
+        panes["w1:p1"] = {"pane_id": "w1:p1", "workspace_id": "w1", "cwd": str(self.f.repo)}
+        self.f.herdr({"panes": panes})
+        self.f.run("start", "app-1")
+        self.assertEqual(self.f.herdr_calls("worktree", "open")[-1][3], "w1")
+
     def test_a_workspace_on_a_linked_worktree_of_the_repository_is_not_the_parent(self):
         self.f.workspaces[0]["worktree"] = self.f.worktree_info(self.f.root / "pr-1")
         self.f.herdr({})

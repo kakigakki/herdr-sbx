@@ -195,7 +195,7 @@ def open_workspace(name, root, workspaces):
 def repo_workspace(root, workspaces):
     """The workspace of the repository's main checkout, which the sandbox's workspace is nested under.
     herdr records the checkout only on workspaces a worktree command has touched; otherwise the first
-    workspace with a pane in the checkout's root directory."""
+    workspace with a pane in the checkout's root directory, else in a directory under it."""
     for w in workspaces:
         tree = worktree_of(w)
         if tree.get("checkout_path") and os.path.realpath(tree["checkout_path"]) == root:
@@ -204,9 +204,16 @@ def repo_workspace(root, workspaces):
         panes = herdr("pane", "list")["panes"]
     except (Abort, KeyError):
         return None
-    here = {p.get("workspace_id") for p in panes
-            if root in {os.path.realpath(d) for d in (p.get("cwd"), p.get("foreground_cwd")) if d}}
-    return next((w for w in workspaces if w["workspace_id"] in here), None)
+    dirs = {(p.get("workspace_id"), os.path.realpath(d)) for p in panes
+            for d in (p.get("cwd"), p.get("foreground_cwd")) if d}
+    # A workspace herdr knows another checkout of is not this one's (the loop above found none of this one).
+    unknown = [w for w in workspaces if not worktree_of(w).get("checkout_path")]
+    for inside in (lambda d: d == root, lambda d: d.startswith(root + os.sep)):  # the root itself first
+        here = {w for w, d in dirs if inside(d)}
+        found = next((w for w in unknown if w["workspace_id"] in here), None)
+        if found:
+            return found
+    return None
 
 
 def checkout_dir(name):

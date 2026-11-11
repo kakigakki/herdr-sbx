@@ -40,6 +40,24 @@ elif args[:2] == ["workspace", "create"]:
     ok({"type": "workspace_created", "workspace": {"workspace_id": "w9"}, "root_pane": {"pane_id": "w9:p1"}})
 elif args[:2] == ["pane", "read"]:
     print("$ ")
+elif args[:2] == ["worktree", "open"]:
+    opened = state.get("worktree_open", {})
+    if opened.get("fail"):
+        print(json.dumps({"error": {"code": "worktree_open_failed"}}))
+        sys.exit(1)
+    if state.get("after_worktree_open"):
+        # herdr records the parent's checkout when the worktree opens: later calls see the next state.
+        os.replace(state["after_worktree_open"], os.environ["FAKE_HERDR"])
+    ok({"type": "worktree_opened", "already_open": opened.get("already_open", False),
+        "workspace": {"workspace_id": opened.get("workspace_id", "w9")}, "worktree": {}})
+elif args[:2] == ["pane", "list"]:
+    if state.get("fail_pane_list"):
+        print(json.dumps({"error": {"code": "workspace_not_found"}}))
+        sys.exit(1)
+    if "--workspace" in args:
+        ok({"panes": [{"pane_id": args[args.index("--workspace") + 1] + ":p1"}]})
+    else:
+        ok({"panes": list(state.get("panes", {}).values())})
 elif args[:2] == ["workspace", "list"]:
     ok({"type": "workspace_list", "workspaces": state.get("workspaces", [])})
 elif args[:2] in (["pane", "run"], ["workspace", "report-metadata"], ["workspace", "focus"],

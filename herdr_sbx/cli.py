@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -140,7 +141,8 @@ def split_direction(origin):
 def sandbox_dir(label, kind="ws"):
     """The cwd of a workspace this plugin makes. Named after the workspace's label, so tools that
     name a workspace after its working directory (e.g. auto-namer) keep that label.
-    `ws` holds a sandbox's own workspaces (label = sandbox name, see sandbox_from_cwd); `tasks` those of launch."""
+    `ws` holds a sandbox's own workspaces (label = sandbox name, see sandbox_from_cwd); `tasks` those of launch.
+    A sandbox's workspace nested under its repository's uses an empty worktree in `wt` instead (checkout_dir)."""
     path = os.path.join(state_dir(), kind, label.replace("/", "-"))
     os.makedirs(path, exist_ok=True)
     return path
@@ -161,18 +163,124 @@ def start_claude(pane, name, prompt_file=None):
 def create_workspace(label, name, kind="ws"):
     """A focused workspace for sandbox `name`; returns its root pane."""
     created = herdr("workspace", "create", "--cwd", sandbox_dir(label, kind), "--label", label, "--focus")
-    workspace = created["workspace"]["workspace_id"]
+    mark_sandbox(created["workspace"]["workspace_id"], name)
+    return created["root_pane"]["pane_id"]
+
+
+def mark_sandbox(workspace, name):
     # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
         herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"{TOKEN}={name}",
               raw=True)
     except Abort:
         pass  # still recognized by its cwd (sandbox_from_cwd)
-    return created["root_pane"]["pane_id"]
 
 
-def open_workspace(name):
-    start_claude(create_workspace(name, name), name)
+def open_workspace(name, root, workspaces):
+    parent = repo_workspace(root, workspaces) if root else None
+    pane = nested_workspace(name, root, parent) if parent else None
+    if pane is None:
+        pane = create_workspace(name, name)
+    if pane:
+        start_claude(pane, name)
+
+
+def repo_workspace(root, workspaces):
+    """The workspace of the repository's main checkout, which the sandbox's workspace is nested under.
+    herdr records the checkout only on workspaces a worktree command has touched; otherwise the first
+    workspace with a pane in the checkout's root directory."""
+    for w in workspaces:
+        tree = worktree_of(w)
+        if tree.get("checkout_path") and os.path.realpath(tree["checkout_path"]) == root:
+            return w
+    try:
+        panes = herdr("pane", "list")["panes"]
+    except (Abort, KeyError):
+        return None
+    here = {p.get("workspace_id") for p in panes
+            if root in {os.path.realpath(d) for d in (p.get("cwd"), p.get("foreground_cwd")) if d}}
+    return next((w for w in workspaces if w["workspace_id"] in here), None)
+
+
+def checkout_dir(name):
+    return os.path.join(state_dir(), "wt", name)
+
+
+def empty_checkout(root, name):
+    """A linked worktree of root with no files checked out, for the sandbox's workspace: herdr nests only
+    worktree workspaces under their repository's workspace. None when git cannot make one."""
+    path = checkout_dir(name)
+    if os.path.exists(path):
+        # Made by an earlier run. Anything else in its place is left alone.
+        return path if repo_root(path) == root else None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # --no-checkout also keeps the repository's post-checkout hook from running.
+        out = subprocess.run(["git", "-C", root, "worktree", "add", "--no-checkout", "--detach", path],
+                             capture_output=True, text=True)
+    except OSError:
+        return None
+    return path if out.returncode == 0 else None
+
+
+def nested_workspace(name, root, parent):
+    """Open the sandbox's workspace as a worktree child of `parent`; returns its pane, False when an open
+    workspace was only focused, or None to fall back to a plain workspace."""
+    path = empty_checkout(root, name)
+    if path is None:
+        return None
+    try:
+        opened = herdr("worktree", "open", "--workspace", parent["workspace_id"], "--path", path, "--label", name,
+                       "--focus")
+        workspace = opened["workspace"]["workspace_id"]
+    except (Abort, KeyError, TypeError):
+        return None
+    # From here the workspace exists: a failure is reported, not answered with a second, plain workspace.
+    mark_sandbox(workspace, name)
+    if opened.get("already_open"):
+        # The sandbox's workspace that lost its token (focus_or_open missed it): token put back, only focus it.
+        herdr("workspace", "focus", workspace, raw=True)
+        return False
+    place_after_group(workspace, parent)
+    return herdr("pane", "list", "--workspace", workspace)["panes"][0]["pane_id"]
+
+
+def place_after_group(workspace, parent):
+    """A new worktree workspace goes to the end of the list; move it next to its parent's group.
+    Best effort: there is no CLI for it, only the socket API, and a misplaced row is still nested."""
+    try:
+        order = herdr("workspace", "list")["workspaces"]
+        ids = [w["workspace_id"] for w in order]
+        i = ids.index(parent["workspace_id"]) + 1
+        # From the fresh list: a parent found by its panes gets its checkout recorded by the worktree open.
+        repo = worktree_of(order[i - 1]).get("repo_key")
+        while i < len(order) and (ids[i] == workspace or (
+                worktree_of(order[i]).get("repo_key") == repo and worktree_of(order[i]).get("is_linked_worktree"))):
+            i += 1
+        api("workspace.move_block", {"workspace_ids": [workspace],
+                                     "before_workspace_id": ids[i] if i < len(ids) else None})
+    except (Abort, OSError, KeyError, ValueError, AttributeError):
+        pass
+
+
+def api(method, params):
+    """One request over herdr's socket API, for methods the CLI does not offer (workspace.move_block)."""
+    path = os.environ.get("HERDR_SOCKET_PATH") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "herdr", "herdr.sock")
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(5)
+        s.connect(path)
+        s.sendall((json.dumps({"id": PLUGIN_ID, "method": method, "params": params}) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    reply = json.loads(data)
+    if "error" in reply:
+        raise Abort(f"herdr {method}: {reply['error']}")
+    return reply.get("result")
 
 
 def add_claude(origin, name):
@@ -272,12 +380,17 @@ def sandbox_of(workspace):
     return (workspace.get("tokens") or {}).get(TOKEN)
 
 
+def worktree_of(workspace):
+    """The Git checkout herdr records on a workspace a worktree command has touched; {} otherwise."""
+    return workspace.get("worktree") or {}
+
+
 def sandbox_from_cwd(cwd):
     """Fallback for a sandbox's workspace whose token is gone (e.g. after a herdr restart)."""
     if not cwd:
         return None
     parent, name = os.path.split(os.path.realpath(cwd))
-    return name if parent == os.path.realpath(os.path.join(state_dir(), "ws")) else None
+    return name if parent in {os.path.realpath(os.path.join(state_dir(), kind)) for kind in ("ws", "wt")} else None
 
 
 def cmd_open():
@@ -314,17 +427,17 @@ def cmd_open():
         name = pick(found, root)
         if name is None:
             return
-    focus_or_open(name, workspaces)
+    focus_or_open(name, workspaces, root)
     remember(label, name)
 
 
-def focus_or_open(name, workspaces):
+def focus_or_open(name, workspaces, root):
     # The sandbox's own workspace, not one `launch` made for a task in the same sandbox.
     existing = next((w for w in workspaces if sandbox_of(w) == name and w.get("label") == name), None)
     if existing:
         herdr("workspace", "focus", existing["workspace_id"], raw=True)
     else:
-        open_workspace(name)
+        open_workspace(name, root, workspaces)
 
 
 def cmd_start(argv):
@@ -339,9 +452,11 @@ def cmd_start(argv):
         found = sandboxes()
     except SbxMissing as e:
         raise NoSandbox(str(e)) from None
-    if not any(s.get("name") == name and s.get("agent") == "claude" for s in found):
+    sandbox = next((s for s in found if s.get("name") == name and s.get("agent") == "claude"), None)
+    if sandbox is None:
         raise NoSandbox(f"no Claude sandbox named {name} (sbx ls)")
-    focus_or_open(name, herdr("workspace", "list")["workspaces"])
+    path = primary_workspace(sandbox)
+    focus_or_open(name, herdr("workspace", "list")["workspaces"], repo_root(path) if path else None)
 
 
 def run_setup(name, setup_file):

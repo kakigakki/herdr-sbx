@@ -2,9 +2,11 @@
 first on PATH, against real git repositories in a temporary directory."""
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -30,6 +32,8 @@ class Fixture:
         self.sbx_state = self.root / "sbx.json"
         self.plugin_state = self.root / "state"
         self.plugin_state.mkdir()
+        # Never the real herdr socket: a test that moves workspaces starts api_server().
+        self.socket_path = self.root / "herdr.sock"
         self.repo = self.root / "app"
         self.repo.mkdir()
         git("init", "-q", "-b", "main", cwd=self.repo)
@@ -37,6 +41,45 @@ class Fixture:
             cwd=self.repo)
         self.workspaces = [{"workspace_id": "w1", "label": "app"}]
         self.herdr({})
+
+    def repo_workspace(self, workspace_id="w1", label="app"):
+        """Make the workspace `workspace_id` the one herdr opened on the repository's main checkout."""
+        w = next(w for w in self.workspaces if w["workspace_id"] == workspace_id)
+        w.update(label=label, worktree=self.worktree_info(self.repo, linked=False))
+        self.herdr({})
+
+    def worktree_info(self, path, linked=True):
+        return {"repo_key": str(self.repo / ".git"), "repo_name": "app", "repo_root": str(self.repo),
+                "checkout_path": str(path), "is_linked_worktree": linked}
+
+    def api_server(self):
+        """A fake herdr socket: records each request and answers with an empty result."""
+        self.api_requests = []
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(self.socket_path))
+        server.listen()
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                with conn:
+                    data = b""
+                    while not data.endswith(b"\n"):
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    if not data:
+                        continue
+                    request = json.loads(data)
+                    self.api_requests.append([request["method"], request["params"]])
+                    conn.sendall((json.dumps({"id": request["id"], "result": {}}) + "\n").encode())
+
+        threading.Thread(target=serve, daemon=True).start()
+        return server
 
     def worktree(self, name):
         path = self.root / name
@@ -76,6 +119,7 @@ class Fixture:
             "FAKE_LOG": str(self.log), "FAKE_HERDR": str(self.herdr_state), "FAKE_SBX": str(self.sbx_state),
             "HERDR_PLUGIN_ID": "herdr-sbx", "HERDR_PLUGIN_STATE_DIR": str(self.plugin_state),
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(getattr(self, "context", {})),
+            "HERDR_SOCKET_PATH": str(self.socket_path),
         })
         if pick:
             env["FAKE_FZF_PICK"] = pick
@@ -428,6 +472,241 @@ class StartByName(unittest.TestCase):
     def test_the_sandbox_name_is_required(self):
         self.assertEqual(self.f.run("start").returncode, 2)
         self.assertEqual(self.f.run("start", "a", "b").returncode, 2)
+
+
+class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
+    """With the repository's workspace open, the sandbox's workspace becomes a worktree child of it."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.f.sandboxes(("app-1", self.f.repo, "running"))
+        self.f.repo_workspace()
+        self.server = self.f.api_server()
+        self.addCleanup(self.server.close)
+        self.checkout = self.f.plugin_state / "wt" / "app-1"
+
+    def git_worktrees(self):
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.f.repo, capture_output=True,
+                             text=True, check=True).stdout
+        return [Path(line[len("worktree "):]).resolve() for line in out.splitlines() if line.startswith("worktree ")]
+
+    def test_start_opens_an_empty_linked_worktree_under_the_repository_workspace(self):
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(self.checkout.resolve(), self.git_worktrees())
+        self.assertEqual([p.name for p in self.checkout.iterdir()], [".git"])  # no files checked out
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [
+            ["worktree", "open", "--workspace", "w1", "--path", str(self.checkout), "--label", "app-1", "--focus"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
+
+    def test_the_new_workspace_moves_right_after_the_repository_group(self):
+        self.f.workspaces += [
+            {"workspace_id": "w2", "label": "app-pr-1", "worktree": self.f.worktree_info(self.f.root / "pr-1")},
+            {"workspace_id": "w3", "label": "other"},
+            {"workspace_id": "w9", "label": "app-1", "worktree": self.f.worktree_info(self.checkout)}]
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.api_requests, [
+            ["workspace.move_block", {"workspace_ids": ["w9"], "before_workspace_id": "w3"}]])
+
+    def test_a_parent_found_by_its_panes_still_keeps_its_worktrees_before_the_new_one(self):
+        # herdr records the parent's checkout only when the worktree is opened: the move reads the list after it.
+        parent = self.f.workspaces[0]
+        tree = parent.pop("worktree")
+        self.f.herdr({"panes": {"w1:p1": {"pane_id": "w1:p1", "workspace_id": "w1", "cwd": str(self.f.repo)}}})
+        before = json.loads(self.f.herdr_state.read_text())
+        before["workspaces"][0]["worktree"] = tree  # what `workspace list` answers after the open
+        before["workspaces"] += [
+            {"workspace_id": "w2", "label": "app-pr-1", "worktree": self.f.worktree_info(self.f.root / "pr-1")},
+            {"workspace_id": "w3", "label": "other"}]
+        state = self.f.root / "after-open.json"
+        state.write_text(json.dumps(before))
+        # The first `workspace list` (before the open) has no provenance, the later one has.
+        self.f.herdr_state.write_text(json.dumps({**json.loads(self.f.herdr_state.read_text()),
+                                                  "after_worktree_open": str(state)}))
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.api_requests, [
+            ["workspace.move_block", {"workspace_ids": ["w9"], "before_workspace_id": "w3"}]])
+
+    def test_the_open_key_in_the_repository_also_nests(self):
+        self.f.focused(self.f.repo)
+
+        self.f.run("open")
+
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 1)
+        self.assertEqual(self.f.launched(), ["app-1"])
+
+    def test_the_checkout_of_an_earlier_run_is_reused(self):
+        self.f.run("start", "app-1")
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_worktrees().count(self.checkout.resolve()), 1)
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_its_workspace_without_the_token_is_focused_not_started_again(self):
+        # e.g. after a herdr restart: herdr answers with the workspace already open on the checkout.
+        self.f.herdr({"worktree_open": {"already_open": True, "workspace_id": "w5"}})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
+            ["workspace", "report-metadata", "w5", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
+        self.assertEqual(self.f.api_requests, [])
+
+    def test_inside_the_nested_workspace_without_its_token_another_claude_joins(self):
+        self.f.focused(self.checkout, workspace="w7", label="app-1", pane="w7:p1")
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
+        self.assertEqual(self.f.launched(), ["app-1"])
+
+    def test_a_failing_worktree_open_falls_back_to_a_plain_workspace(self):
+        self.f.herdr({"worktree_open": {"fail": True}})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [
+            ["workspace", "create", "--cwd", str(self.f.plugin_state / "ws" / "app-1"), "--label", "app-1",
+             "--focus"]])
+        self.assertEqual(self.f.launched(), ["app-1"])
+
+    def test_a_failure_after_the_nested_workspace_opened_is_reported_without_a_second_workspace(self):
+        self.f.herdr({"worktree_open": {"workspace_id": "gone"}, "fail_pane_list": True})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
+    def test_a_sandbox_whose_workspace_is_a_subdirectory_nests_under_the_repository(self):
+        sub = self.f.repo / "src"
+        sub.mkdir()
+        self.f.sandboxes(("app-1", sub, "running"))
+
+        self.f.run("start", "app-1")
+        self.f.run("start", "app-1")
+
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_a_checkout_whose_directory_was_removed_is_made_again(self):
+        self.f.run("start", "app-1")
+        subprocess.run(["rm", "-rf", str(self.checkout)], check=True)  # git still has it registered
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual([p.name for p in self.checkout.iterdir()], [".git"])
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_a_submodules_checkout_is_reused(self):
+        sub = self.f.root / "lib"
+        sub.mkdir()
+        git("init", "-q", "-b", "main", cwd=sub)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init",
+            cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib", cwd=self.f.repo)
+        module = (self.f.repo / "lib").resolve()
+        self.f.sandboxes(("app-1", module, "running"))
+        self.f.workspaces[0]["worktree"] = self.f.worktree_info(module, linked=False)
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+        self.f.run("start", "app-1")
+
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_a_pane_less_workspace_after_the_open_is_reported(self):
+        self.f.herdr({"empty_pane_list": True})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 1)
+        self.assertNotIn("Traceback", out.stderr)
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
+    def test_something_else_in_the_checkouts_place_is_left_alone(self):
+        self.checkout.mkdir(parents=True)
+        (self.checkout / "keep.txt").write_text("mine")
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
+        self.assertEqual((self.checkout / "keep.txt").read_text(), "mine")
+        self.assertEqual(len(self.f.herdr_calls("workspace", "create")), 1)
+        [note] = self.f.herdr_calls("notification", "show")
+        self.assertIn(str(self.checkout), " ".join(note))
+
+    def test_without_a_reachable_socket_it_still_opens_nested(self):
+        self.server.close()
+        self.f.socket_path.unlink()
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.f.launched(), ["app-1"])
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_without_herdr_knowing_its_checkout_the_workspace_with_a_pane_in_the_repository_is_the_parent(self):
+        del self.f.workspaces[0]["worktree"]
+        self.f.workspaces.insert(0, {"workspace_id": "w2", "label": "elsewhere"})
+        self.f.herdr({"panes": {
+            "w2:p1": {"pane_id": "w2:p1", "workspace_id": "w2", "cwd": str(self.f.root)},
+            "w1:p1": {"pane_id": "w1:p1", "workspace_id": "w1", "cwd": str(self.f.root),
+                      "foreground_cwd": str(self.f.repo)},
+        }})
+
+        self.f.run("start", "app-1")
+
+        [opened] = self.f.herdr_calls("worktree", "open")
+        self.assertEqual(opened[:4], ["worktree", "open", "--workspace", "w1"])
+
+    def test_a_pane_in_a_subdirectory_also_finds_the_parent_but_the_root_comes_first(self):
+        del self.f.workspaces[0]["worktree"]
+        self.f.workspaces.insert(0, {"workspace_id": "w2", "label": "app-src"})
+        self.f.workspaces.append({"workspace_id": "w3", "label": "other-repo",
+                                  "worktree": {"checkout_path": str(self.f.root / "other")}})
+        src = self.f.repo / "src"
+        src.mkdir()
+        panes = {"w2:p1": {"pane_id": "w2:p1", "workspace_id": "w2", "cwd": str(src)},
+                 "w3:p1": {"pane_id": "w3:p1", "workspace_id": "w3", "cwd": str(self.f.repo)}}
+        self.f.herdr({"panes": panes})
+
+        self.f.run("start", "app-1")
+        [opened] = self.f.herdr_calls("worktree", "open")
+        self.assertEqual(opened[3], "w2")  # w3 is in the root but herdr knows it as another checkout
+
+        panes["w1:p1"] = {"pane_id": "w1:p1", "workspace_id": "w1", "cwd": str(self.f.repo)}
+        self.f.herdr({"panes": panes})
+        self.f.run("start", "app-1")
+        self.assertEqual(self.f.herdr_calls("worktree", "open")[-1][3], "w1")
+
+    def test_a_workspace_on_a_linked_worktree_of_the_repository_is_not_the_parent(self):
+        self.f.workspaces[0]["worktree"] = self.f.worktree_info(self.f.root / "pr-1")
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
+        self.assertEqual(len(self.f.herdr_calls("workspace", "create")), 1)
 
 
 class HeadlessLaunch(unittest.TestCase):

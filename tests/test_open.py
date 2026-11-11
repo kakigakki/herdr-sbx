@@ -606,6 +606,43 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
 
+    def test_a_checkout_whose_directory_was_removed_is_made_again(self):
+        self.f.run("start", "app-1")
+        subprocess.run(["rm", "-rf", str(self.checkout)], check=True)  # git still has it registered
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual([p.name for p in self.checkout.iterdir()], [".git"])
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_a_submodules_checkout_is_reused(self):
+        sub = self.f.root / "lib"
+        sub.mkdir()
+        git("init", "-q", "-b", "main", cwd=sub)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init",
+            cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib", cwd=self.f.repo)
+        module = (self.f.repo / "lib").resolve()
+        self.f.sandboxes(("app-1", module, "running"))
+        self.f.workspaces[0]["worktree"] = self.f.worktree_info(module, linked=False)
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+        self.f.run("start", "app-1")
+
+        self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 2)
+        self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
+
+    def test_a_pane_less_workspace_after_the_open_is_reported(self):
+        self.f.herdr({"empty_pane_list": True})
+
+        out = self.f.run("start", "app-1")
+
+        self.assertEqual(out.returncode, 1)
+        self.assertNotIn("Traceback", out.stderr)
+        self.assertEqual(len(self.f.herdr_calls("notification", "show")), 1)
+
     def test_something_else_in_the_checkouts_place_is_left_alone(self):
         self.checkout.mkdir(parents=True)
         (self.checkout / "keep.txt").write_text("mine")

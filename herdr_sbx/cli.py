@@ -64,19 +64,26 @@ def focused_cwd(ctx):
     return ctx.get("focused_pane_cwd")
 
 
+def rev_parse(cwd, *args):
+    out = subprocess.run(["git", "-C", cwd, "rev-parse", *args], capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def common_dir(cwd):
+    """The git dir shared by all worktrees of cwd's repository."""
+    common = rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
+    return os.path.realpath(common) if common else None
+
+
 def repo_root(cwd):
     """The main checkout of cwd's repository, also from a linked worktree."""
-    def rev_parse(*args):
-        out = subprocess.run(["git", "-C", cwd, "rev-parse", *args], capture_output=True, text=True)
-        return out.stdout.strip() if out.returncode == 0 else None
-
-    common = rev_parse("--path-format=absolute", "--git-common-dir")
+    common = rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
     if common is None:
         return None
     if os.path.basename(common) == ".git":
         return os.path.realpath(os.path.dirname(common))
     # A submodule keeps its git dir under the parent's .git/modules.
-    top = rev_parse("--show-toplevel")
+    top = rev_parse(cwd, "--show-toplevel")
     return os.path.realpath(top) if top else None
 
 
@@ -211,12 +218,13 @@ def empty_checkout(root, name):
     worktree workspaces under their repository's workspace. None when git cannot make one."""
     path = checkout_dir(name)
     if os.path.exists(path):
-        # Made by an earlier run. Anything else in its place is left alone.
-        return path if repo_root(path) == root else None
+        # Made by an earlier run (same git dir; repo_root would not do for a submodule). Anything else is left alone.
+        return path if common_dir(path) == common_dir(root) else None
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # --no-checkout also keeps the repository's post-checkout hook from running.
-        out = subprocess.run(["git", "-C", root, "worktree", "add", "--no-checkout", "--detach", path],
+        # --no-checkout also keeps the repository's post-checkout hook from running. -f: the directory of an
+        # earlier one may have been removed with the state dir while git still has it registered.
+        out = subprocess.run(["git", "-C", root, "worktree", "add", "-f", "--no-checkout", "--detach", path],
                              capture_output=True, text=True)
     except OSError:
         return None
@@ -571,7 +579,7 @@ def main(argv):
         print(e, file=sys.stderr)  # for script callers, which see no notification
         notify(str(e))
         return 1
-    except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
+    except (OSError, LookupError, ValueError, TypeError, AttributeError) as e:
         # Unexpected herdr/sbx output: say so instead of dying silently in the plugin log.
         print(f"unexpected error: {e!r}", file=sys.stderr)
         notify(f"unexpected error: {e!r}")

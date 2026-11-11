@@ -55,7 +55,8 @@ elif args[:2] == ["pane", "list"]:
         print(json.dumps({"error": {"code": "workspace_not_found"}}))
         sys.exit(1)
     if "--workspace" in args:
-        ok({"panes": [{"pane_id": args[args.index("--workspace") + 1] + ":p1"}]})
+        workspace = args[args.index("--workspace") + 1]
+        ok({"panes": [] if state.get("empty_pane_list") else [{"pane_id": workspace + ":p1"}]})
     else:
         ok({"panes": list(state.get("panes", {}).values())})
 elif args[:2] == ["workspace", "list"]:

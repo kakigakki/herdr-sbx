@@ -214,6 +214,17 @@ class OpenSandboxWorkspace(unittest.TestCase):
 
         self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
         self.assertEqual(self.f.launched(), ["app-2"])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w7", "app-2")])
+
+    def test_inside_a_sandbox_workspace_with_its_badge_it_is_not_marked_again(self):
+        self.f.sandbox_workspace("app-2")
+        self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w5", label="app-2", pane="w5:p1")
+        self.f.sandboxes(("app-2", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.launched(), ["app-2"])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [])
 
     def test_without_its_token_a_launch_workspace_is_not_taken_for_a_sandbox(self):
         # Its directory is named after its label, which may be another sandbox's name.
@@ -595,6 +606,28 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
 
         self.f.run("start", "app-1")
 
+        self.assertEqual(self.git_status(), "")
+
+    def test_an_open_workspace_of_an_earlier_version_gets_its_checkout_quieted_when_focused(self):
+        self.commit_a_file()
+        self.checkout.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", "--no-checkout", "--detach", str(self.checkout), cwd=self.f.repo)
+        self.f.sandbox_workspace("app-1", badge=False)
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
+
+    def test_run_from_a_git_hook_it_leaves_the_callers_index_alone(self):
+        self.commit_a_file()
+
+        self.f.run("start", "app-1", extra_env={"GIT_DIR": str(self.f.repo / ".git")})
+
+        flags = subprocess.run(["git", "ls-files", "-v"], cwd=self.f.repo, capture_output=True, text=True,
+                               check=True).stdout
+        self.assertEqual(flags, "H README\n")  # not S (skip-worktree)
         self.assertEqual(self.git_status(), "")
 
     def test_the_checkout_of_an_earlier_run_is_reused(self):

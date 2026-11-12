@@ -620,6 +620,18 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(self.git_status(), "")
         self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
 
+    def test_the_repositorys_index_hooks_do_not_run_for_the_empty_checkout(self):
+        self.commit_a_file()
+        ran = self.f.root / "hook-ran"
+        hook = self.f.repo / ".git" / "hooks" / "post-index-change"
+        hook.write_text(f"#!/bin/sh\ntouch {ran}\n")
+        hook.chmod(0o755)
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+        self.assertFalse(ran.exists())
+
     def test_run_from_a_git_hook_it_leaves_the_callers_index_alone(self):
         self.commit_a_file()
 

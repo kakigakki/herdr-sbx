@@ -253,12 +253,14 @@ def hide_missing_files(path):
     """Mark every file of the empty checkout skip-worktree, so that git status (and the sidebar's git status)
     does not list them all as deleted. Only cosmetic: failures are ignored."""
     # Only the checkout's own index is touched, and its detached HEAD never moves: redoing it on reuse is harmless.
+    # The repository's hooks (post-index-change) are shared by its worktrees and have nothing to do here.
+    git = ["git", "-C", path, "-c", "core.hooksPath=/dev/null"]
     try:
-        out = subprocess.run(["git", "-C", path, "read-tree", "HEAD"], capture_output=True)
+        out = subprocess.run([*git, "read-tree", "HEAD"], capture_output=True)
         if out.returncode == 0:
-            out = subprocess.run(["git", "-C", path, "ls-files", "-z"], capture_output=True)
+            out = subprocess.run([*git, "ls-files", "-z"], capture_output=True)
         if out.returncode == 0:
-            subprocess.run(["git", "-C", path, "update-index", "-z", "--skip-worktree", "--stdin"], input=out.stdout,
+            subprocess.run([*git, "update-index", "-z", "--skip-worktree", "--stdin"], input=out.stdout,
                            capture_output=True)
     except OSError:
         pass

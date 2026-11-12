@@ -158,7 +158,8 @@ class OpenSandboxWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "app-1", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1",
+             "--token", "herdr_sbx_badge=sbx"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
@@ -357,7 +358,8 @@ class Launch(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "🔍app#7", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-2"]])
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-2",
+             "--token", "herdr_sbx_badge=sbx"]])
         self.assertEqual(self.f.herdr_calls("pane", "split"), [[
             "pane", "split", "w9:p1", "--direction", "right", "--ratio", "0.6", "--cwd", str(ws_dir), "--no-focus"]])
         runs = self.f.herdr_calls("pane", "run")
@@ -501,7 +503,8 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
             ["worktree", "open", "--workspace", "w1", "--path", str(self.checkout), "--label", "app-1", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1",
+             "--token", "herdr_sbx_badge=sbx"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
 
     def test_the_new_workspace_moves_right_after_the_repository_group(self):
@@ -545,6 +548,32 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 1)
         self.assertEqual(self.f.launched(), ["app-1"])
 
+    def commit_a_file(self):
+        (self.f.repo / "README").write_text("app")
+        git("add", "README", cwd=self.f.repo)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "readme", cwd=self.f.repo)
+
+    def git_status(self):
+        return subprocess.run(["git", "status", "--porcelain"], cwd=self.checkout, capture_output=True, text=True,
+                              check=True).stdout
+
+    def test_git_status_in_the_empty_checkout_does_not_list_the_repositorys_files_as_deleted(self):
+        self.commit_a_file()
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+        subprocess.run(["git", "worktree", "remove", str(self.checkout)], cwd=self.f.repo, check=True)
+
+    def test_a_checkout_made_before_the_files_were_hidden_is_quieted_when_reused(self):
+        self.commit_a_file()
+        self.checkout.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", "--no-checkout", "--detach", str(self.checkout), cwd=self.f.repo)
+        self.assertNotEqual(self.git_status(), "")
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+
     def test_the_checkout_of_an_earlier_run_is_reused(self):
         self.f.run("start", "app-1")
         self.f.run("start", "app-1")
@@ -563,7 +592,8 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
         self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w5", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+            ["workspace", "report-metadata", "w5", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1",
+             "--token", "herdr_sbx_badge=sbx"]])
         self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
         self.assertEqual(self.f.api_requests, [])
 

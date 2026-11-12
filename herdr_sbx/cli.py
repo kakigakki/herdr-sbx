@@ -18,6 +18,9 @@ PLUGIN_ID = "herdr-sbx"
 SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
 # Workspace token marking a sandbox's workspace. Namespaced: herdr merges tokens of all sources.
 TOKEN = "herdr_sbx"
+# Display-only token for the sidebar (`$herdr_sbx_badge` in ui.sidebar.spaces), telling sandboxes from worktrees.
+BADGE_TOKEN = "herdr_sbx_badge"
+BADGE = "sbx"
 
 
 class Abort(Exception):
@@ -178,7 +181,7 @@ def mark_sandbox(workspace, name):
     # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
         herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"{TOKEN}={name}",
-              raw=True)
+              "--token", f"{BADGE_TOKEN}={BADGE}", raw=True)
     except Abort:
         pass  # still recognized by its cwd (sandbox_from_cwd)
 
@@ -228,6 +231,7 @@ def empty_checkout(root, name):
         # Made by an earlier run (same git dir; repo_root would not do for a submodule). Anything else is left alone,
         # but said: otherwise the sandbox would silently never nest again.
         if common_dir(path) == common_dir(root):
+            hide_missing_files(path)  # also for checkouts made before it was done
             return path
         notify(f"{path} is not an empty checkout of {root}; remove it to nest {name} under its repository")
         return None
@@ -239,7 +243,23 @@ def empty_checkout(root, name):
                              capture_output=True, text=True)
     except OSError:
         return None
-    return path if out.returncode == 0 else None
+    if out.returncode != 0:
+        return None
+    hide_missing_files(path)
+    return path
+
+
+def hide_missing_files(path):
+    """Mark every file of the empty checkout skip-worktree, so that git status (and the sidebar's git status)
+    does not list them all as deleted. Only cosmetic: failures are ignored."""
+    try:
+        # Only the checkout's own index is touched, and its detached HEAD never moves: redoing it on reuse is harmless.
+        subprocess.run(["git", "-C", path, "read-tree", "HEAD"], capture_output=True, check=True)
+        files = subprocess.run(["git", "-C", path, "ls-files", "-z"], capture_output=True, check=True).stdout
+        subprocess.run(["git", "-C", path, "update-index", "-z", "--skip-worktree", "--stdin"], input=files,
+                       capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        pass
 
 
 def nested_workspace(name, root, parent):

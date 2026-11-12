@@ -18,6 +18,9 @@ PLUGIN_ID = "herdr-sbx"
 SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]+")
 # Workspace token marking a sandbox's workspace. Namespaced: herdr merges tokens of all sources.
 TOKEN = "herdr_sbx"
+# Display-only token for the sidebar (`$herdr_sbx_badge` in ui.sidebar.spaces), telling sandboxes from worktrees.
+BADGE_TOKEN = "herdr_sbx_badge"
+BADGE_TEXT = "sbx"
 
 
 class Abort(Exception):
@@ -178,7 +181,7 @@ def mark_sandbox(workspace, name):
     # The token, not the label, identifies the sandbox: labels can be renamed.
     try:
         herdr("workspace", "report-metadata", workspace, "--source", PLUGIN_ID, "--token", f"{TOKEN}={name}",
-              raw=True)
+              "--token", f"{BADGE_TOKEN}={BADGE_TEXT}", raw=True)
     except Abort:
         pass  # still recognized by its cwd (sandbox_from_cwd)
 
@@ -228,6 +231,7 @@ def empty_checkout(root, name):
         # Made by an earlier run (same git dir; repo_root would not do for a submodule). Anything else is left alone,
         # but said: otherwise the sandbox would silently never nest again.
         if common_dir(path) == common_dir(root):
+            hide_missing_files(path)  # also for checkouts made before files were hidden
             return path
         notify(f"{path} is not an empty checkout of {root}; remove it to nest {name} under its repository")
         return None
@@ -239,7 +243,27 @@ def empty_checkout(root, name):
                              capture_output=True, text=True)
     except OSError:
         return None
-    return path if out.returncode == 0 else None
+    if out.returncode != 0:
+        return None
+    hide_missing_files(path)
+    return path
+
+
+def hide_missing_files(path):
+    """Mark every file of the empty checkout skip-worktree, so that git status (and the sidebar's git status)
+    does not list them all as deleted. Only cosmetic: failures are ignored."""
+    # Only the checkout's own index is touched, and its detached HEAD never moves: redoing it on reuse is harmless.
+    # The repository's hooks (post-index-change) are shared by its worktrees and have nothing to do here.
+    git = ["git", "-C", path, "-c", "core.hooksPath=/dev/null"]
+    try:
+        out = subprocess.run([*git, "read-tree", "HEAD"], capture_output=True)
+        if out.returncode == 0:
+            out = subprocess.run([*git, "ls-files", "-z"], capture_output=True)
+        if out.returncode == 0:
+            subprocess.run([*git, "update-index", "-z", "--skip-worktree", "--stdin"], input=out.stdout,
+                           capture_output=True)
+    except OSError:
+        pass
 
 
 def nested_workspace(name, root, parent):
@@ -420,13 +444,16 @@ def cmd_open():
         raise Abort("no focused pane")
     workspaces = herdr("workspace", "list")["workspaces"]
     cwd = focused_cwd(ctx)
-    here = sandbox_of(next((w for w in workspaces if w["workspace_id"] == workspace), {})) or sandbox_from_cwd(cwd)
+    current = next((w for w in workspaces if w["workspace_id"] == workspace), {})
+    here = sandbox_of(current) or sandbox_from_cwd(cwd)
     if here:
         # Inside a sandbox's workspace: one more Claude in the same sandbox.
         if not SANDBOX_NAME.fullmatch(here):
             raise Abort(f"unexpected sandbox name: {here!r}")
         if here not in {s.get("name") for s in sandboxes()}:
             raise Abort(f"sandbox {here} no longer exists (sbx ls)")
+        if BADGE_TOKEN not in (current.get("tokens") or {}):
+            mark_sandbox(workspace, here)  # tokens lost (herdr restarted) or marked by an earlier version
         add_claude(origin, here)
         return
     if not cwd:
@@ -454,6 +481,11 @@ def focus_or_open(name, workspaces, root):
     # The sandbox's own workspace, not one `launch` made for a task in the same sandbox.
     existing = next((w for w in workspaces if sandbox_of(w) == name and w.get("label") == name), None)
     if existing:
+        if BADGE_TOKEN not in existing["tokens"]:
+            # Opened by a version without the badge, and maybe before the checkout's files were hidden.
+            mark_sandbox(existing["workspace_id"], name)
+            if root and os.path.exists(checkout_dir(name)):
+                empty_checkout(root, name)
         herdr("workspace", "focus", existing["workspace_id"], raw=True)
     else:
         open_workspace(name, root, workspaces)
@@ -573,6 +605,10 @@ def cmd_launch(argv):
 
 
 def main(argv):
+    # Run from a git hook, these would point the git commands at the caller's repository instead of their -C
+    # directory: hide_missing_files would then rewrite that repository's index.
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        os.environ.pop(name, None)
     commands = {"open": cmd_open, "pick": cmd_pick, "launch": cmd_launch, "start": cmd_start}
     with_args = ("launch", "start")  # parse their own arguments
     if not argv or argv[0] not in commands or (argv[0] not in with_args and len(argv) != 1):

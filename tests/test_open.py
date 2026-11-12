@@ -19,6 +19,16 @@ def git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+def commit(*args, cwd):
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", *args, cwd=cwd)
+
+
+def marked(workspace, name):
+    """The report-metadata call that marks a sandbox's workspace."""
+    return ["workspace", "report-metadata", workspace, "--source", "herdr-sbx", "--token", f"herdr_sbx={name}",
+            "--token", "herdr_sbx_badge=sbx"]
+
+
 def launch(name):
     return f'HERDR_AGENT=claude sbx run --name {name} && herdr pane close "$HERDR_PANE_ID"'
 
@@ -37,8 +47,7 @@ class Fixture:
         self.repo = self.root / "app"
         self.repo.mkdir()
         git("init", "-q", "-b", "main", cwd=self.repo)
-        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init",
-            cwd=self.repo)
+        commit("--allow-empty", "-m", "init", cwd=self.repo)
         self.workspaces = [{"workspace_id": "w1", "label": "app"}]
         self.herdr({})
 
@@ -89,9 +98,10 @@ class Fixture:
     def herdr(self, state):
         self.herdr_state.write_text(json.dumps({"workspaces": self.workspaces, **state}))
 
-    def sandbox_workspace(self, name, workspace_id="w5"):
-        """An existing workspace this plugin made for sandbox `name`."""
-        self.workspaces.append({"workspace_id": workspace_id, "label": name, "tokens": {"herdr_sbx": name}})
+    def sandbox_workspace(self, name, workspace_id="w5", badge=True):
+        """An existing workspace this plugin made for sandbox `name` (without the badge: by an earlier version)."""
+        tokens = {"herdr_sbx": name, **({"herdr_sbx_badge": "sbx"} if badge else {})}
+        self.workspaces.append({"workspace_id": workspace_id, "label": name, "tokens": tokens})
 
     def focused(self, cwd, *, workspace="w1", label="app", pane="w1:p1", size=(240, 60)):
         self.herdr({"panes": {pane: {"pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd)}},
@@ -157,8 +167,7 @@ class OpenSandboxWorkspace(unittest.TestCase):
         self.assertTrue(ws_dir.is_dir())
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "app-1", "--focus"]])
-        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w9", "app-1")])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
         self.assertEqual(self.f.herdr_calls("notification"), [])
 
@@ -205,6 +214,17 @@ class OpenSandboxWorkspace(unittest.TestCase):
 
         self.assertEqual(self.f.herdr_calls("plugin", "pane", "open"), [])
         self.assertEqual(self.f.launched(), ["app-2"])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w7", "app-2")])
+
+    def test_inside_a_sandbox_workspace_with_its_badge_it_is_not_marked_again(self):
+        self.f.sandbox_workspace("app-2")
+        self.f.focused(self.f.plugin_state / "ws" / "app-2", workspace="w5", label="app-2", pane="w5:p1")
+        self.f.sandboxes(("app-2", self.f.repo, "running"))
+
+        self.f.run("open")
+
+        self.assertEqual(self.f.launched(), ["app-2"])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [])
 
     def test_without_its_token_a_launch_workspace_is_not_taken_for_a_sandbox(self):
         # Its directory is named after its label, which may be another sandbox's name.
@@ -356,8 +376,7 @@ class Launch(unittest.TestCase):
         ws_dir = self.f.plugin_state / "tasks" / "🔍app#7"
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [
             ["workspace", "create", "--cwd", str(ws_dir), "--label", "🔍app#7", "--focus"]])
-        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-2"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w9", "app-2")])
         self.assertEqual(self.f.herdr_calls("pane", "split"), [[
             "pane", "split", "w9:p1", "--direction", "right", "--ratio", "0.6", "--cwd", str(ws_dir), "--no-focus"]])
         runs = self.f.herdr_calls("pane", "run")
@@ -429,6 +448,17 @@ class StartByName(unittest.TestCase):
 
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [])
+        self.assertEqual(self.f.herdr_calls("pane", "run"), [])
+
+    def test_a_workspace_marked_without_the_badge_gets_it_when_focused(self):
+        self.f.sandbox_workspace("app-1", badge=False)
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w5", "app-1")])
+        self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
 
     def test_a_workspace_launch_made_in_the_same_sandbox_is_not_reused(self):
@@ -491,6 +521,15 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
                              text=True, check=True).stdout
         return [Path(line[len("worktree "):]).resolve() for line in out.splitlines() if line.startswith("worktree ")]
 
+    def commit_a_file(self):
+        (self.f.repo / "README").write_text("app")
+        git("add", "README", cwd=self.f.repo)
+        commit("-m", "readme", cwd=self.f.repo)
+
+    def git_status(self):
+        return subprocess.run(["git", "status", "--porcelain"], cwd=self.checkout, capture_output=True, text=True,
+                              check=True).stdout
+
     def test_start_opens_an_empty_linked_worktree_under_the_repository_workspace(self):
         out = self.f.run("start", "app-1")
 
@@ -500,8 +539,7 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(self.f.herdr_calls("worktree", "open"), [
             ["worktree", "open", "--workspace", "w1", "--path", str(self.checkout), "--label", "app-1", "--focus"]])
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
-        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w9", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w9", "app-1")])
         self.assertEqual(self.f.herdr_calls("pane", "run"), [["pane", "run", "w9:p1", launch("app-1")]])
 
     def test_the_new_workspace_moves_right_after_the_repository_group(self):
@@ -545,6 +583,65 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(len(self.f.herdr_calls("worktree", "open")), 1)
         self.assertEqual(self.f.launched(), ["app-1"])
 
+    def test_git_status_in_the_empty_checkout_does_not_list_the_repositorys_files_as_deleted(self):
+        self.commit_a_file()
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+
+    def test_the_empty_checkout_can_be_removed_without_force(self):
+        self.commit_a_file()
+        self.f.run("start", "app-1")
+
+        out = subprocess.run(["git", "worktree", "remove", str(self.checkout)], cwd=self.f.repo, capture_output=True)
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn(self.checkout.resolve(), self.git_worktrees())
+
+    def test_a_checkout_made_before_the_files_were_hidden_is_quieted_when_reused(self):
+        self.commit_a_file()
+        self.checkout.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", "--no-checkout", "--detach", str(self.checkout), cwd=self.f.repo)
+        self.assertNotEqual(self.git_status(), "")
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+
+    def test_an_open_workspace_of_an_earlier_version_gets_its_checkout_quieted_when_focused(self):
+        self.commit_a_file()
+        self.checkout.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", "--no-checkout", "--detach", str(self.checkout), cwd=self.f.repo)
+        self.f.sandbox_workspace("app-1", badge=False)
+        self.f.herdr({})
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+        self.assertEqual(self.f.herdr_calls("worktree", "open"), [])
+
+    def test_the_repositorys_index_hooks_do_not_run_for_the_empty_checkout(self):
+        self.commit_a_file()
+        ran = self.f.root / "hook-ran"
+        hook = self.f.repo / ".git" / "hooks" / "post-index-change"
+        hook.write_text(f"#!/bin/sh\ntouch {ran}\n")
+        hook.chmod(0o755)
+
+        self.f.run("start", "app-1")
+
+        self.assertEqual(self.git_status(), "")
+        self.assertFalse(ran.exists())
+
+    def test_run_from_a_git_hook_it_leaves_the_callers_index_alone(self):
+        self.commit_a_file()
+
+        self.f.run("start", "app-1", extra_env={"GIT_DIR": str(self.f.repo / ".git")})
+
+        flags = subprocess.run(["git", "ls-files", "-v"], cwd=self.f.repo, capture_output=True, text=True,
+                               check=True).stdout
+        self.assertEqual(flags, "H README\n")  # not S (skip-worktree)
+        self.assertEqual(self.git_status(), "")
+
     def test_the_checkout_of_an_earlier_run_is_reused(self):
         self.f.run("start", "app-1")
         self.f.run("start", "app-1")
@@ -562,8 +659,7 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.f.herdr_calls("pane", "run"), [])
         self.assertEqual(self.f.herdr_calls("workspace", "create"), [])
-        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [
-            ["workspace", "report-metadata", "w5", "--source", "herdr-sbx", "--token", "herdr_sbx=app-1"]])
+        self.assertEqual(self.f.herdr_calls("workspace", "report-metadata"), [marked("w5", "app-1")])
         self.assertEqual(self.f.herdr_calls("workspace", "focus"), [["workspace", "focus", "w5"]])
         self.assertEqual(self.f.api_requests, [])
 
@@ -620,8 +716,7 @@ class NestedUnderTheRepositoryWorkspace(unittest.TestCase):
         sub = self.f.root / "lib"
         sub.mkdir()
         git("init", "-q", "-b", "main", cwd=sub)
-        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init",
-            cwd=sub)
+        commit("--allow-empty", "-m", "init", cwd=sub)
         git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib", cwd=self.f.repo)
         module = (self.f.repo / "lib").resolve()
         self.f.sandboxes(("app-1", module, "running"))
